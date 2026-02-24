@@ -1,0 +1,14 @@
+{
+  "name": "@openclaw/auto-rednote",
+  "version": "2026.2.22",
+  "description": "小红书自动化运营插件 - 完整网页端操作能力",
+  "type": "module",
+  "dependencies": {
+    "@sinclair/typebox": "0.34.47"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

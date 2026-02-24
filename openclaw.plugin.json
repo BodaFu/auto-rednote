@@ -1,0 +1,17 @@
+{
+  "id": "auto-rednote",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "dbPath": {
+        "type": "string",
+        "description": "通知状态 SQLite 数据库路径（默认：~/.openclaw/auto-rednote.db）"
+      },
+      "browserProfile": {
+        "type": "string",
+        "description": "浏览器 profile 名称（默认：使用 host Chrome）"
+      }
+    }
+  }
+}
