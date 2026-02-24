@@ -132,6 +132,8 @@ export async function replyComment(
   parentCommentId?: string,
   profile?: string,
 ): Promise<{ success: boolean; message: string }> {
+  // replyTargetId 是最终用于点击回复按钮的评论 ID，可能在容错降级时被替换为 parentCommentId
+  let replyTargetId = commentId;
   const url = `${XHS_HOME}/explore/${feedId}?xsec_token=${encodeURIComponent(xsecToken)}&xsec_source=pc_feed`;
   const targetId = await getOrCreateXhsTab(profile);
 
@@ -197,8 +199,18 @@ export async function replyComment(
     }
 
     if (!commentFound) {
-      // 容错4：所有子评论路径失败，降级为直接滚动查找（当作顶级评论处理）
+      // 容错4：所有子评论路径失败，降级为直接滚动查找 commentId（当作顶级评论处理）
       commentFound = await scrollToComment(targetId, commentId, profile);
+    }
+
+    if (!commentFound && parentCommentId) {
+      // 容错5：commentId 本身也找不到（已删除），降级为回复 parentCommentId
+      // 至少能成功回复对方，而不是直接失败
+      const parentFound = await scrollToComment(targetId, parentCommentId, profile);
+      if (parentFound) {
+        commentFound = true;
+        replyTargetId = parentCommentId;
+      }
     }
   } else {
     // 路径B：无 parentCommentId，先滚动查找顶级评论
@@ -227,7 +239,7 @@ export async function replyComment(
   }
 
   // 点击回复按钮（.right .interactions .reply）
-  const replyClicked = await clickReplyButton(targetId, commentId, profile);
+  const replyClicked = await clickReplyButton(targetId, replyTargetId, profile);
   if (!replyClicked) {
     return { success: false, message: "未找到回复按钮" };
   }
@@ -552,22 +564,52 @@ async function readPageAPIEntries(
 }
 
 // 从页面 API 条目中反查 commentId 所属的顶级父评论 ID
+// 对齐 mcp 的 findParentCommentIDWithScroll：数据不足时触发滚动加载更多再重试
 async function findParentFromPageAPIEntries(
   targetId: string,
   commentId: string,
   profile?: string,
 ): Promise<string | null> {
-  const entries = await readPageAPIEntries(targetId, profile);
-  for (const entry of entries) {
-    try {
-      const resp = JSON.parse(entry.body) as {
-        data?: { comments?: Array<{ id: string; sub_comments?: Array<{ id: string }> }> };
-      };
-      for (const c of resp.data?.comments ?? []) {
-        if (c.sub_comments?.some((s) => s.id === commentId)) return c.id;
-      }
-    } catch {}
+  const maxScrollRounds = 10;
+
+  for (let round = 0; round <= maxScrollRounds; round++) {
+    const entries = await readPageAPIEntries(targetId, profile);
+
+    // 在已有数据中查找
+    for (const entry of entries) {
+      try {
+        const resp = JSON.parse(entry.body) as {
+          data?: { comments?: Array<{ id: string; sub_comments?: Array<{ id: string }> }> };
+        };
+        for (const c of resp.data?.comments ?? []) {
+          if (c.sub_comments?.some((s) => s.id === commentId)) return c.id;
+        }
+      } catch {}
+    }
+
+    // 如果 API 已无更多数据，不再滚动
+    if (entries.length > 0 && !entries[entries.length - 1].hasMore) {
+      return null;
+    }
+
+    if (round === maxScrollRounds) break;
+
+    // 触发滚动加载更多评论
+    const lastCount = entries.length;
+    await evaluate(
+      targetId,
+      `() => { window.scrollBy(0, window.innerHeight * 0.8); }`,
+      profile,
+    );
+
+    // 等待新数据（最多 5 秒）
+    for (let i = 0; i < 5; i++) {
+      await sleep(1000);
+      const newEntries = await readPageAPIEntries(targetId, profile);
+      if (newEntries.length > lastCount) break;
+    }
   }
+
   return null;
 }
 
@@ -603,12 +645,15 @@ async function getTopLevelIdsFromPageAPIEntries(
 }
 
 // 检查 commentId 在已收集的 API 条目中的状态
+// 三态结果：found / not_found / maybe
+// 关键：sub_comments 只预加载前几条，当有顶级评论的子评论未完全预加载时
+// 不能断定目标已删除，需展开后才能确认（对齐 mcp 的 checkCommentIDInAPIEntries）
 function checkCommentInEntries(
   entries: Array<{ body: string; hasMore: boolean }>,
   commentId: string,
 ): "found" | "not_found" | "maybe" {
   if (entries.length === 0) return "maybe";
-  let hasMaybeSubComments = false;
+  let hasPotentialParent = false;
   for (const entry of entries) {
     try {
       const resp = JSON.parse(entry.body) as {
@@ -626,11 +671,19 @@ function checkCommentInEntries(
         if (c.id === commentId) return "found";
         if (c.sub_comments?.some((s) => s.id === commentId)) return "found";
         const subCount = parseInt(c.sub_comment_count ?? "0", 10);
-        if (subCount > (c.sub_comments?.length ?? 0)) hasMaybeSubComments = true;
+        const preloadedCount = c.sub_comments?.length ?? 0;
+        // 仅当子评论未被预加载（preloadedCount === 0）时才标记为 potential，
+        // 避免已有预加载数据但目标不在其中时误判为 maybe
+        if (subCount > 0 && preloadedCount === 0) {
+          hasPotentialParent = true;
+        } else if (preloadedCount > 0 && subCount > preloadedCount) {
+          // 预加载不完整（有更多子评论未加载）
+          hasPotentialParent = true;
+        }
       }
     } catch {}
   }
-  if (hasMaybeSubComments) return "maybe";
+  if (hasPotentialParent) return "maybe";
   const lastEntry = entries[entries.length - 1];
   if (!lastEntry.hasMore) return "not_found";
   return "maybe";
@@ -731,6 +784,8 @@ async function scrollToComment(
       stagnantChecks = 0;
     } else {
       stagnantChecks++;
+      // 评论数为 0 且 API 也没有数据，说明评论区根本未加载（可能已关闭）
+      if (currentCount === 0 && lastAPICount === 0 && stagnantChecks >= 2) break;
       if (stagnantChecks >= 3) break;
     }
 
