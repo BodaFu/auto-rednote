@@ -14,12 +14,12 @@
 AI Agent（Claude / Gemini / …）
   → xhs_* 工具调用
   → auto-rednote 插件（TypeScript）
-  → HTTP → OpenClaw browser control server（127.0.0.1:18791）
-  → Playwright → 你已登录的 Chrome
+  → 进程内调用 → OpenClaw browser control
+  → Playwright → OpenClaw 管理的 Chrome（openclaw profile）
   → 小红书网页端（www.xiaohongshu.com）
 ```
 
-插件不启动独立浏览器，而是控制 OpenClaw 已管理的 Chrome 实例，自动共享你的登录会话。
+插件通过**进程内调用**直接使用 OpenClaw 的 browser control，无需独立 HTTP 端口。它控制 OpenClaw 管理的 Chromium 实例，自动共享你的登录会话。
 
 ---
 
@@ -27,32 +27,58 @@ AI Agent（Claude / Gemini / …）
 
 | 依赖 | 说明 |
 |---|---|
-| [OpenClaw](https://github.com/openclaw/openclaw) | 已安装，Gateway 正在运行 |
-| Chrome | 已在小红书网页端登录（`https://www.xiaohongshu.com`） |
-| OpenClaw browser | 已通过 `openclaw browser start` 启动 |
+| [OpenClaw](https://github.com/openclaw/openclaw) | 已安装，Gateway 正在运行（`openclaw gateway`） |
+| OpenClaw browser | 已通过 `openclaw browser` 启动（使用内置 `openclaw` Chrome profile） |
 | Node.js | ≥ 22（使用内置 `node:sqlite`） |
+| 小红书账号 | 已在 OpenClaw browser 中登录（见下方步骤） |
 
 ---
 
-## 安装
+## 安装步骤
 
-### 1. 克隆到 OpenClaw 的 extensions 目录
+### 第 1 步 — 找到 OpenClaw 的 extensions 目录
+
+extensions 目录紧邻 OpenClaw 安装目录：
 
 ```bash
-cd /path/to/openclaw/extensions
-git clone https://github.com/BodaFu/auto-rednote.git
+# npm 全局安装（最常见）
+ls $(npm root -g)/openclaw/extensions/
+
+# Homebrew
+ls /opt/homebrew/lib/node_modules/openclaw/extensions/
+
+# 源码目录
+ls /path/to/openclaw/extensions/
 ```
 
-### 2. 安装依赖
+> **提示**：运行 `openclaw doctor`，输出中会显示 gateway 二进制路径，`extensions/` 就在同级目录下。
+
+### 第 2 步 — 将 auto-rednote clone 到 extensions 目录
 
 ```bash
+cd $(npm root -g)/openclaw/extensions   # 根据你的安装方式调整路径
+git clone https://github.com/BodaFu/auto-rednote.git
 cd auto-rednote
 npm install
 ```
 
-### 3. 在 OpenClaw 配置中启用
+### 第 3 步 — 在 OpenClaw 配置中启用
 
-在 OpenClaw 配置文件（通常为 `~/.openclaw/config.json`）中添加：
+打开 `~/.openclaw/openclaw.json`（不存在则新建），添加：
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "auto-rednote": {
+        "enabled": true
+      }
+    }
+  }
+}
+```
+
+可选：指定自定义数据库路径：
 
 ```json
 {
@@ -69,11 +95,31 @@ npm install
 }
 ```
 
-### 4. 重启 OpenClaw Gateway
+### 第 4 步 — 在 OpenClaw browser 中登录小红书
+
+OpenClaw 管理一个独立的 Chrome profile（`openclaw`），需要在这个浏览器里登录小红书：
 
 ```bash
-kill -HUP $(pgrep -f openclaw-gateway)
+openclaw browser
 ```
+
+这会打开 OpenClaw 的 Chromium 窗口。访问 `https://www.xiaohongshu.com` 正常登录即可。登录状态会持久化在 `openclaw` profile 中。
+
+### 第 5 步 — 重启 Gateway
+
+```bash
+# 发送 HUP 信号，热重载插件（无需完整重启）
+kill -HUP $(pgrep -f "openclaw.*gateway")
+
+# 或者完整重启
+openclaw gateway --force
+```
+
+### 第 6 步 — 验证
+
+向你的 Agent 发送：*"调用 xhs_check_login，告诉我结果。"*
+
+预期返回：`{ "loggedIn": true, "message": "已登录" }`
 
 ---
 
@@ -82,7 +128,8 @@ kill -HUP $(pgrep -f openclaw-gateway)
 | 配置项 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `dbPath` | string | `~/.openclaw/auto-rednote.db` | 通知状态 SQLite 数据库路径 |
-| `browserProfile` | string | （host Chrome） | OpenClaw browser profile 名称 |
+
+> `browserProfile` 配置项无需设置——插件始终使用 OpenClaw 内置的 `openclaw` Chrome profile。
 
 ---
 
@@ -163,11 +210,28 @@ Agent 调用流程：
 
 ## 技术说明
 
+- **进程内 browser control**：插件通过 `jiti` TypeScript 加载器直接 import OpenClaw 内部的 browser client，所有 browser 调用走 OpenClaw 的进程内 dispatcher，无需独立 HTTP 端口。
 - **SPA 预热**：小红书是 React SPA，插件会确保 Chrome 已访问首页完成 `window.__INITIAL_STATE__` 初始化，再提取数据。
 - **数据提取**：优先从 `window.__INITIAL_STATE__` 提取结构化数据，降级到 DOM 解析。
-- **API 拦截**：通知获取通过 OpenClaw 的 response body 端点拦截 `/api/sns/web/v1/you/mentions`。评论回复在页面注入持续拦截器（`window.__commentAPIEntries`），收集所有评论 API 响应，处理虚拟化渲染和多级评论结构。
-- **多级评论处理**：`xhs_reply_comment` 实现了 4 级容错查找策略，包括从拦截的 API 数据中反推真实父评论 ID，应对虚拟化列表场景。
+- **API 拦截**：通知获取拦截 `/api/sns/web/v1/you/mentions`。评论回复在页面注入持续拦截器（`window.__commentAPIEntries`），处理虚拟化渲染和多级评论结构。
+- **多级评论处理**：`xhs_reply_comment` 实现了 4 级容错查找策略，包括从拦截的 API 数据中反推真实父评论 ID。
 - **通知状态持久化**：使用 Node.js 内置 `node:sqlite` 将通知处理状态存储在本地 SQLite 数据库中。
+
+---
+
+## 常见问题
+
+**`plugin not found: auto-rednote`**
+找不到插件目录。确认 `auto-rednote/` 直接位于 OpenClaw 安装目录下的 `extensions/` 文件夹内，且已在目录内执行 `npm install`。
+
+**`Can't reach the OpenClaw browser control service`**
+OpenClaw browser 尚未启动，或 Chromium 进程崩溃。运行 `openclaw browser` 打开浏览器窗口，等待几秒后重试。
+
+**`{ "loggedIn": false }`**
+需要在 OpenClaw Chromium 窗口中登录小红书。运行 `openclaw browser`，访问 `https://www.xiaohongshu.com` 并登录。
+
+**工具在命令行测试正常，但通过 Agent 调用超时**
+这通常发生在 gateway 刚重启后，browser control service 还在初始化。等待 10–15 秒后重试。
 
 ---
 

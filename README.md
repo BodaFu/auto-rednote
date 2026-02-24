@@ -14,12 +14,12 @@ Reuses your already-logged-in Chrome via OpenClaw's browser control, giving an A
 AI Agent (Claude / Gemini / …)
   → xhs_* tool calls
   → auto-rednote extension (TypeScript)
-  → HTTP → OpenClaw browser control server (127.0.0.1:18791)
-  → Playwright → your logged-in Chrome
+  → in-process call → OpenClaw browser control
+  → Playwright → your logged-in Chrome (OpenClaw profile)
   → Xiaohongshu web (www.xiaohongshu.com)
 ```
 
-The extension never spawns its own browser. It controls the Chrome instance that OpenClaw already manages, sharing your login session automatically.
+The extension calls OpenClaw's browser control **in-process** — no separate HTTP port needed. It controls the Chromium instance that OpenClaw manages, sharing your login session automatically.
 
 ---
 
@@ -27,32 +27,58 @@ The extension never spawns its own browser. It controls the Chrome instance that
 
 | Requirement | Details |
 |---|---|
-| [OpenClaw](https://github.com/openclaw/openclaw) | Installed and gateway running |
-| Chrome | Logged in to Xiaohongshu web (`https://www.xiaohongshu.com`) |
-| OpenClaw browser | Started via `openclaw browser start` |
+| [OpenClaw](https://github.com/openclaw/openclaw) | Installed and gateway running (`openclaw gateway`) |
+| OpenClaw browser | Started via `openclaw browser` (uses the built-in `openclaw` Chrome profile) |
 | Node.js | ≥ 22 (for built-in `node:sqlite`) |
+| Xiaohongshu account | Logged in via the OpenClaw browser (see setup below) |
 
 ---
 
 ## Installation
 
-### 1. Clone into OpenClaw's extensions directory
+### Step 1 — Find your OpenClaw extensions directory
+
+The extensions directory is next to the OpenClaw installation:
 
 ```bash
-cd /path/to/openclaw/extensions
-git clone https://github.com/BodaFu/auto-rednote.git
+# npm global install (most common)
+ls $(npm root -g)/openclaw/extensions/
+
+# Homebrew
+ls /opt/homebrew/lib/node_modules/openclaw/extensions/
+
+# Source checkout
+ls /path/to/openclaw/extensions/
 ```
 
-### 2. Install dependencies
+> **Tip**: Run `openclaw doctor` — it prints the gateway binary path. The `extensions/` folder is in the same parent directory.
+
+### Step 2 — Clone auto-rednote into the extensions directory
 
 ```bash
+cd $(npm root -g)/openclaw/extensions   # adjust path for your install
+git clone https://github.com/BodaFu/auto-rednote.git
 cd auto-rednote
 npm install
 ```
 
-### 3. Enable in OpenClaw config
+### Step 3 — Enable in OpenClaw config
 
-Add to your OpenClaw configuration file (usually `~/.openclaw/config.json`):
+Open `~/.openclaw/openclaw.json` (create if missing) and add:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "auto-rednote": {
+        "enabled": true
+      }
+    }
+  }
+}
+```
+
+Optional: set a custom SQLite database path:
 
 ```json
 {
@@ -69,11 +95,31 @@ Add to your OpenClaw configuration file (usually `~/.openclaw/config.json`):
 }
 ```
 
-### 4. Restart the OpenClaw gateway
+### Step 4 — Log in to Xiaohongshu in the OpenClaw browser
+
+OpenClaw manages a dedicated Chrome profile (`openclaw`). You need to log in to Xiaohongshu inside this browser:
 
 ```bash
-kill -HUP $(pgrep -f openclaw-gateway)
+openclaw browser
 ```
+
+This opens the OpenClaw Chromium window. Navigate to `https://www.xiaohongshu.com` and log in normally. The session is persisted in the `openclaw` profile.
+
+### Step 5 — Restart the gateway
+
+```bash
+# Send HUP to reload extensions without full restart
+kill -HUP $(pgrep -f "openclaw.*gateway")
+
+# Or do a full restart
+openclaw gateway --force
+```
+
+### Step 6 — Verify
+
+Ask your agent: *"Call xhs_check_login and tell me the result."*
+
+Expected response: `{ "loggedIn": true, "message": "已登录" }`
 
 ---
 
@@ -82,7 +128,8 @@ kill -HUP $(pgrep -f openclaw-gateway)
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `dbPath` | string | `~/.openclaw/auto-rednote.db` | SQLite database path for notification state |
-| `browserProfile` | string | *(host Chrome)* | OpenClaw browser profile name |
+
+> The `browserProfile` option is not needed — the extension always uses OpenClaw's built-in `openclaw` Chrome profile.
 
 ---
 
@@ -163,11 +210,28 @@ Agent flow:
 
 ## Technical notes
 
+- **In-process browser control**: The extension imports OpenClaw's internal browser client directly (via `jiti` TypeScript loader). No HTTP port is needed — all browser calls go through OpenClaw's in-process dispatcher.
 - **SPA warm-up**: Xiaohongshu is a React SPA. The extension ensures Chrome has visited the homepage to initialize `window.__INITIAL_STATE__` before extracting data.
 - **Data extraction**: Prioritizes structured data from `window.__INITIAL_STATE__`; falls back to DOM parsing.
-- **API interception**: Notification fetching intercepts `/api/sns/web/v1/you/mentions` via OpenClaw's response body endpoint. Comment reply uses a continuous `fetch`/XHR interceptor injected into the page (`window.__commentAPIEntries`) to handle virtualized rendering and multi-level threads.
+- **API interception**: Notification fetching intercepts `/api/sns/web/v1/you/mentions`. Comment reply injects a continuous `fetch`/XHR interceptor (`window.__commentAPIEntries`) to handle virtualized rendering and multi-level threads.
 - **Multi-level comment handling**: `xhs_reply_comment` implements a 4-level fallback strategy to locate comments in virtualized lists, including inferring true parent IDs from intercepted API data.
 - **Notification state**: Uses Node.js built-in `node:sqlite` to persist notification processing state in a local SQLite database.
+
+---
+
+## Troubleshooting
+
+**`plugin not found: auto-rednote`**
+The extension directory was not found. Check that `auto-rednote/` is directly inside the `extensions/` folder next to your OpenClaw installation, and that `npm install` was run inside it.
+
+**`Can't reach the OpenClaw browser control service`**
+The OpenClaw browser hasn't started yet, or the Chromium process crashed. Run `openclaw browser` to open the browser window, wait a few seconds, then retry.
+
+**`{ "loggedIn": false }`**
+You need to log in to Xiaohongshu inside the OpenClaw Chromium window. Run `openclaw browser`, navigate to `https://www.xiaohongshu.com`, and log in.
+
+**Tools work in CLI but time out via agent**
+This can happen right after a gateway restart while the browser control service is initializing. Wait 10–15 seconds and retry.
 
 ---
 
