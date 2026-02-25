@@ -242,12 +242,16 @@ export default function register(api: OpenClawPluginApi) {
             },
           ),
         ),
+        limit: Type.Optional(
+          Type.Number({ description: "最大返回数量，默认 20。建议不超过 50。" }),
+        ),
       }),
       async execute(_id: string, params: Record<string, unknown>) {
         const keyword = String(params.keyword ?? "");
         if (!keyword.trim()) throw new Error("keyword 不能为空");
+        const limit = typeof params.limit === "number" ? Math.max(1, params.limit) : 20;
 
-        const feeds = await searchFeeds(
+        const allFeeds = await searchFeeds(
           keyword,
           {
             sortBy: params.sortBy as "general" | "latest" | undefined,
@@ -256,14 +260,15 @@ export default function register(api: OpenClawPluginApi) {
           },
           browserProfile,
         );
+        const feeds = allFeeds.slice(0, limit);
         return {
           content: [
             {
               type: "text" as const,
-              text: `搜索"${keyword}"找到 ${feeds.length} 条结果\n${JSON.stringify(feeds, null, 2)}`,
+              text: `搜索"${keyword}"找到 ${allFeeds.length} 条结果，返回前 ${feeds.length} 条\n${JSON.stringify(feeds, null, 2)}`,
             },
           ],
-          details: { keyword, count: feeds.length, feeds },
+          details: { keyword, total: allFeeds.length, count: feeds.length, feeds },
         };
       },
     },
@@ -628,7 +633,7 @@ export default function register(api: OpenClawPluginApi) {
   api.registerTool(
     {
       name: "xhs_publish",
-      description: "发布小红书笔记（图文或视频）。需要提供本地文件路径。",
+      description: "发布小红书笔记（图文或视频）。需要提供本地文件路径。⚠️ 需要 OpenClaw 浏览器环境（运行 `openclaw browser` 启动浏览器后方可使用）。",
       parameters: Type.Object({
         type: Type.Union([Type.Literal("image"), Type.Literal("video")], {
           description: "笔记类型：image（图文）或 video（视频）",
