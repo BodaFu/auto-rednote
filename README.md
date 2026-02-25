@@ -133,7 +133,7 @@ Expected response: `{ "loggedIn": true, "message": "已登录" }`
 
 ---
 
-## Tools (19 total)
+## Tools (26 total)
 
 ### Account
 
@@ -178,6 +178,20 @@ Expected response: `{ "loggedIn": true, "message": "已登录" }`
 |---|---|
 | `xhs_publish` | Publish an image or video note |
 
+### Desktop DM (Private Messages) — macOS only
+
+> Requires the Xiaohongshu macOS app (rednote, available on the Mac App Store) running in **full-screen mode** on its own Space. The web version of Xiaohongshu does not support direct messages.
+
+| Tool | Description |
+|---|---|
+| `xhs_desktop_im_unread` | Scan for unread DMs — navigates to the Messages tab, takes a screenshot for visual analysis, returns any unread badge elements |
+| `xhs_desktop_im_inbox` | Take a screenshot of the DM inbox (no unread filtering) |
+| `xhs_desktop_im_open` | Open a conversation by coordinates `(x, y)` or element ID |
+| `xhs_desktop_im_send` | Send a message in the currently open conversation |
+| `xhs_desktop_im_back` | Navigate back (taps the `<` button in the top-left) |
+| `xhs_desktop_im_see` | List UI elements on screen (debug / dynamic element lookup) |
+| `xhs_desktop_screenshot` | Take a screenshot of the current app state |
+
 ---
 
 ## Example agent workflows
@@ -193,6 +207,21 @@ Agent flow:
 3. filter comment_on_my_note / reply_to_my_comment types
 4. xhs_reply_comment { feedId, xsecToken, commentId, content: "Thanks for your support!" }
 5. xhs_mark_notification { id, status: "replied" }
+```
+
+### Reply to private messages (DMs)
+
+```
+User: Check my Xiaohongshu DMs and reply to any unread messages
+
+Agent flow:
+1. xhs_desktop_im_unread     → screenshot of Messages tab + unread badges
+2. visually analyse screenshot to find unread conversations and their (x, y)
+3. xhs_desktop_im_open { x, y }    → opens conversation, screenshot shows message history
+4. read message content from screenshot
+5. xhs_desktop_im_send { text: "..." }  → sends reply
+6. verify reply appears in screenshot
+7. xhs_desktop_im_back       → return to inbox for next message
 ```
 
 ### Search and like
@@ -216,6 +245,8 @@ Agent flow:
 - **API interception**: Notification fetching intercepts `/api/sns/web/v1/you/mentions`. Comment reply injects a continuous `fetch`/XHR interceptor (`window.__commentAPIEntries`) to handle virtualized rendering and multi-level threads.
 - **Multi-level comment handling**: `xhs_reply_comment` implements a 4-level fallback strategy to locate comments in virtualized lists, including inferring true parent IDs from intercepted API data.
 - **Notification state**: Uses Node.js built-in `node:sqlite` to persist notification processing state in a local SQLite database.
+- **Desktop DM — Space switching**: The Xiaohongshu macOS app runs in its own full-screen Space. `activateApp` uses `System Events set frontmost to true` (the only mechanism that switches Spaces programmatically) rather than `tell application X to activate` (which only activates the process without switching Spaces). Screenshots are taken with `screencapture -R` after the Space animation completes (~800 ms).
+- **Desktop DM — iOS on Mac limitations**: The app is an iOS port; its Accessibility tree has very low fidelity (most elements labelled "button" or "text"). The tools degrade gracefully: `peekaboo see` failures fall back to pure visual analysis of the screenshot. Clicks use absolute screen coordinates derived from the known window region (x=0, y=33, 1512×949 for a full-screen display).
 
 ---
 
@@ -232,6 +263,33 @@ You need to log in to Xiaohongshu inside the OpenClaw Chromium window. Run `open
 
 **Tools work in CLI but time out via agent**
 This can happen right after a gateway restart while the browser control service is initializing. Wait 10–15 seconds and retry.
+
+---
+
+## Changelog
+
+### v2026.2.25
+
+- **New: Desktop DM tools** — 7 new `xhs_desktop_*` tools for replying to private messages via the Xiaohongshu macOS app
+  - `xhs_desktop_im_unread`, `xhs_desktop_im_inbox`, `xhs_desktop_im_open`, `xhs_desktop_im_send`, `xhs_desktop_im_back`, `xhs_desktop_im_see`, `xhs_desktop_screenshot`
+- Fixed full-screen Space switching: `activateApp` now uses `System Events set frontmost` to correctly cross Space boundaries
+- Fixed screenshot capture from other Spaces: `screenshot()` activates the app and waits 800 ms for the animation before calling `screencapture`
+- Calibrated UI coordinates for full-screen 1512×949 layout (input box y=930, back button y=30)
+- `xhs_search`: added `limit` parameter (default 20) to control result count
+
+### v2026.2.24
+
+- Overhauled notification parsing and comment-finding logic
+- Added `injectCommentAPIInterceptor` for continuous API response collection
+- Rewrote `scrollToComment` and `expandAndFindSubComment` with stall detection and `has_more` handling
+- Completed `replyComment` 4-level fallback paths
+- Fixed `followUser` ReferenceError
+- Enhanced `parseCommentApiResponse` to return `subCommentCount` / `subCommentHasMore`
+
+### v2026.2.22
+
+- Initial release with 19 core tools
+- Full coverage: account, content, interaction, notifications, publishing
 
 ---
 

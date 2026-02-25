@@ -133,7 +133,7 @@ openclaw gateway --force
 
 ---
 
-## 工具列表（共 19 个）
+## 工具列表（共 26 个）
 
 ### 账号工具
 
@@ -178,6 +178,20 @@ openclaw gateway --force
 |---|---|
 | `xhs_publish` | 发布图文或视频笔记 |
 
+### 桌面 IM 工具（私信回复）— 仅 macOS
+
+> 需要小红书 macOS App（rednote，Mac App Store 可下载）以**全屏模式**运行在独立 Space 中。网页版小红书不支持私信功能。
+
+| 工具 | 说明 |
+|---|---|
+| `xhs_desktop_im_unread` | 扫描未读私信 — 导航到「消息」Tab，截图返回供视觉分析，同时返回未读角标元素 |
+| `xhs_desktop_im_inbox` | 截图消息收件箱（不过滤未读状态） |
+| `xhs_desktop_im_open` | 通过坐标 `(x, y)` 或元素 ID 打开指定对话 |
+| `xhs_desktop_im_send` | 在当前已打开的对话中发送私信 |
+| `xhs_desktop_im_back` | 返回上一页（点击左上角 `<` 按钮） |
+| `xhs_desktop_im_see` | 列出当前界面所有 UI 元素（调试 / 动态元素定位） |
+| `xhs_desktop_screenshot` | 截图当前小红书 App 界面 |
+
 ---
 
 ## 使用示例
@@ -193,6 +207,21 @@ Agent 调用流程：
 3. 过滤 comment_on_my_note / reply_to_my_comment 类型
 4. xhs_reply_comment { feedId, xsecToken, commentId, content: "谢谢支持！" }
 5. xhs_mark_notification { id, status: "replied" }
+```
+
+### 自动回复私信
+
+```
+用户：帮我查一下小红书有没有新私信，有的话帮我回复
+
+Agent 调用流程：
+1. xhs_desktop_im_unread          → 截图消息列表 + 未读角标信息
+2. 视觉分析截图，找到有未读的对话行及其坐标 (x, y)
+3. xhs_desktop_im_open { x, y }   → 打开对话，截图显示消息历史
+4. 读取截图中的消息内容
+5. xhs_desktop_im_send { text: "..." }  → 发送回复
+6. 视觉确认回复已出现在对话中
+7. xhs_desktop_im_back            → 返回收件箱，继续处理下一条
 ```
 
 ### 搜索并点赞
@@ -216,6 +245,8 @@ Agent 调用流程：
 - **API 拦截**：通知获取拦截 `/api/sns/web/v1/you/mentions`。评论回复在页面注入持续拦截器（`window.__commentAPIEntries`），处理虚拟化渲染和多级评论结构。
 - **多级评论处理**：`xhs_reply_comment` 实现了 4 级容错查找策略，包括从拦截的 API 数据中反推真实父评论 ID。
 - **通知状态持久化**：使用 Node.js 内置 `node:sqlite` 将通知处理状态存储在本地 SQLite 数据库中。
+- **桌面 IM — Space 切换**：小红书 macOS App 在独立全屏 Space 运行。`activateApp` 使用 `System Events set frontmost to true`（唯一能跨 Space 切换的方式），而非 `tell application X to activate`（只激活进程，不切换 Space）。截图在 Space 切换动画完成后（~800ms）由 `screencapture -R` 执行。
+- **桌面 IM — iOS on Mac 限制**：该 App 是 iOS 移植版，Accessibility 树质量极低（大多数元素标注为"按钮"/"文本"）。工具实现了优雅降级：`peekaboo see` 失败时自动回退到纯截图视觉分析。点击操作使用从已知窗口区域（x=0, y=33, 1512×949）推算的绝对屏幕坐标。
 
 ---
 
@@ -236,6 +267,15 @@ OpenClaw browser 尚未启动，或 Chromium 进程崩溃。运行 `openclaw bro
 ---
 
 ## 版本历史
+
+### v2026.2.25
+
+- **新增：桌面 IM 工具** — 7 个新的 `xhs_desktop_*` 工具，通过小红书 macOS App 实现私信回复能力
+  - `xhs_desktop_im_unread`、`xhs_desktop_im_inbox`、`xhs_desktop_im_open`、`xhs_desktop_im_send`、`xhs_desktop_im_back`、`xhs_desktop_im_see`、`xhs_desktop_screenshot`
+- 修复全屏 Space 切换：`activateApp` 改用 `System Events set frontmost` 正确跨 Space 切换
+- 修复跨 Space 截图：`screenshot()` 先激活 App 等待动画完成（800ms）再截图
+- 校准全屏 1512×949 布局的 UI 坐标（输入框 y=930，返回按钮 y=30）
+- `xhs_search` 新增 `limit` 参数（默认 20），控制返回条数
 
 ### v2026.2.24
 
