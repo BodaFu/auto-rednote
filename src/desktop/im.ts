@@ -21,8 +21,10 @@ import {
   activateApp,
   clickCoords,
   clickElement,
+  getFrontmostApp,
   hotkey,
   pressKey,
+  restoreFrontmostApp,
   screenshot,
   seeElements,
   sleep,
@@ -112,6 +114,25 @@ function isUnreadBadge(e: PeekabooElement): boolean {
   return Boolean(e.label?.includes("未读") && e.is_actionable);
 }
 
+/**
+ * 执行一段操作，完成后根据 cfg.restoreApp 决定是否切回原前台 App。
+ *
+ * 在整个操作序列（activate → 点击/输入/截图）完成后统一切回，
+ * 避免中途切回导致后续操作点错 App。
+ */
+async function withRestore<T>(cfg: PeekabooConfig, fn: () => Promise<T>): Promise<T> {
+  // 操作前记录当前前台 App
+  const previousApp = cfg.restoreApp ? getFrontmostApp() : null;
+  try {
+    return await fn();
+  } finally {
+    // 操作完成后切回（跳过小红书自身，避免切回到 discover/rednote）
+    if (previousApp && previousApp !== cfg.processName && previousApp !== "rednote") {
+      restoreFrontmostApp(previousApp);
+    }
+  }
+}
+
 // ============================================================================
 // 核心操作
 // ============================================================================
@@ -133,34 +154,35 @@ function isUnreadBadge(e: PeekabooElement): boolean {
  * 5. 调用 sendMessage 回复
  */
 export async function scanUnread(cfg: PeekabooConfig): Promise<ImUnreadResult> {
-  activateApp(cfg);
-  await sleep(800); // Space 切换动画需要约 700ms
+  return withRestore(cfg, async () => {
+    activateApp(cfg);
+    await sleep(800); // Space 切换动画需要约 700ms
 
-  // 点击「消息」Tab
-  clickCoords(BOTTOM_NAV.messages.x, BOTTOM_NAV.messages.y, cfg);
-  await sleep(1200);
+    // 点击「消息」Tab
+    clickCoords(BOTTOM_NAV.messages.x, BOTTOM_NAV.messages.y, cfg);
+    await sleep(1200);
 
-  // 截图（主要信息来源，Agent 通过视觉分析识别未读消息）
-  const scr = screenshot(cfg);
+    // 截图（主要信息来源，Agent 通过视觉分析识别未读消息）
+    const scr = screenshot(cfg);
 
-  // 尝试扫描 AX 元素提取未读角标（peekaboo see 对 iOS App 可能超时，降级为空）
-  let unreadBadges: Array<{ elemId: string; label: string; description: string }> = [];
-  try {
-    const { elements } = seeElements(cfg);
-    unreadBadges = elements
-      .filter(isUnreadBadge)
-      .map((e) => ({ elemId: e.id, label: e.label ?? "", description: e.description ?? "" }));
-  } catch {
-    // peekaboo see 不可用（iOS App 兼容性问题），降级为纯视觉模式
-    // Agent 需完全依赖截图视觉分析来识别未读消息
-  }
+    // 尝试扫描 AX 元素提取未读角标（peekaboo see 对 iOS App 可能超时，降级为空）
+    let unreadBadges: Array<{ elemId: string; label: string; description: string }> = [];
+    try {
+      const { elements } = seeElements(cfg);
+      unreadBadges = elements
+        .filter(isUnreadBadge)
+        .map((e) => ({ elemId: e.id, label: e.label ?? "", description: e.description ?? "" }));
+    } catch {
+      // peekaboo see 不可用（iOS App 兼容性问题），降级为纯视觉模式
+    }
 
-  return {
-    screenshot: scr,
-    unreadBadges,
-    hasUnread: unreadBadges.length > 0,
-    badgeCount: unreadBadges.length,
-  };
+    return {
+      screenshot: scr,
+      unreadBadges,
+      hasUnread: unreadBadges.length > 0,
+      badgeCount: unreadBadges.length,
+    };
+  });
 }
 
 /**
@@ -168,13 +190,15 @@ export async function scanUnread(cfg: PeekabooConfig): Promise<ImUnreadResult> {
  * 与 scanUnread 类似，但不做未读过滤，适合查看全量消息列表。
  */
 export async function getInbox(cfg: PeekabooConfig): Promise<ScreenshotResult> {
-  activateApp(cfg);
-  await sleep(800);
+  return withRestore(cfg, async () => {
+    activateApp(cfg);
+    await sleep(800);
 
-  clickCoords(BOTTOM_NAV.messages.x, BOTTOM_NAV.messages.y, cfg);
-  await sleep(1000);
+    clickCoords(BOTTOM_NAV.messages.x, BOTTOM_NAV.messages.y, cfg);
+    await sleep(1000);
 
-  return screenshot(cfg);
+    return screenshot(cfg);
+  });
 }
 
 /**
@@ -195,24 +219,26 @@ export async function openConversation(
     throw new Error("必须提供 elemId 或 (x, y) 坐标之一");
   }
 
-  activateApp(cfg);
-  await sleep(800);
+  return withRestore(cfg, async () => {
+    activateApp(cfg);
+    await sleep(800);
 
-  let clickedAt: { x: number; y: number } | undefined;
+    let clickedAt: { x: number; y: number } | undefined;
 
-  if (target.elemId) {
-    const result = clickElement(target.elemId, cfg);
-    if (result.clickLocation) clickedAt = result.clickLocation;
-  } else {
-    const x = target.x!;
-    const y = target.y!;
-    clickCoords(x, y, cfg);
-    clickedAt = { x, y };
-  }
+    if (target.elemId) {
+      const result = clickElement(target.elemId, cfg);
+      if (result.clickLocation) clickedAt = result.clickLocation;
+    } else {
+      const x = target.x!;
+      const y = target.y!;
+      clickCoords(x, y, cfg);
+      clickedAt = { x, y };
+    }
 
-  await sleep(waitMs);
+    await sleep(waitMs);
 
-  return { screenshot: screenshot(cfg), clickedAt };
+    return { screenshot: screenshot(cfg), clickedAt };
+  });
 }
 
 /**
@@ -230,22 +256,24 @@ export async function openConversation(
 export async function sendMessage(text: string, cfg: PeekabooConfig): Promise<ImSendResult> {
   if (!text.trim()) throw new Error("消息内容不能为空");
 
-  activateApp(cfg);
-  await sleep(800);
+  return withRestore(cfg, async () => {
+    activateApp(cfg);
+    await sleep(800);
 
-  // 点击输入框获取焦点
-  clickCoords(INPUT_BOX.x, INPUT_BOX.y, cfg);
-  await sleep(400);
+    // 点击输入框获取焦点
+    clickCoords(INPUT_BOX.x, INPUT_BOX.y, cfg);
+    await sleep(400);
 
-  // 输入文字
-  typeText(text, cfg);
-  await sleep(300);
+    // 输入文字
+    typeText(text, cfg);
+    await sleep(300);
 
-  // 发送
-  pressKey("return", cfg);
-  await sleep(800);
+    // 发送
+    pressKey("return", cfg);
+    await sleep(800);
 
-  return { screenshot: screenshot(cfg) };
+    return { screenshot: screenshot(cfg) };
+  });
 }
 
 /**
@@ -253,21 +281,23 @@ export async function sendMessage(text: string, cfg: PeekabooConfig): Promise<Im
  * 用于从对话页返回消息列表，或从消息列表返回首页。
  */
 export async function navigateBack(cfg: PeekabooConfig): Promise<ScreenshotResult> {
-  activateApp(cfg);
-  await sleep(800);
+  return withRestore(cfg, async () => {
+    activateApp(cfg);
+    await sleep(800);
 
-  clickCoords(BACK_BUTTON.x, BACK_BUTTON.y, cfg);
-  await sleep(700);
+    clickCoords(BACK_BUTTON.x, BACK_BUTTON.y, cfg);
+    await sleep(700);
 
-  return screenshot(cfg);
+    return screenshot(cfg);
+  });
 }
 
 /**
  * 截图当前小红书桌面 App 界面。
- * 无需激活（截图不需要焦点），直接返回当前窗口内容。
+ * 会切换到小红书 Space 截图，根据 cfg.restoreApp 决定是否切回。
  */
-export function takeScreenshot(cfg: PeekabooConfig): ScreenshotResult {
-  return screenshot(cfg);
+export async function takeScreenshot(cfg: PeekabooConfig): Promise<ScreenshotResult> {
+  return withRestore(cfg, async () => screenshot(cfg));
 }
 
 /**
@@ -280,27 +310,33 @@ export function takeScreenshot(cfg: PeekabooConfig): ScreenshotResult {
  * 有意义的元素通常是导航相关（"X条未读"等）。
  */
 export async function getCurrentElements(cfg: PeekabooConfig): Promise<ImSeeResult> {
-  activateApp(cfg);
-  await sleep(800);
+  return withRestore(cfg, async () => {
+    activateApp(cfg);
+    await sleep(800);
 
-  const scr = screenshot(cfg);
+    const scr = screenshot(cfg);
 
-  // peekaboo see 对小红书 iOS App 可能超时，降级为空元素列表
-  let seeResult = { elements: [] as PeekabooElement[], elementCount: 0, interactableCount: 0, snapshotId: "" };
-  try {
-    seeResult = seeElements(cfg);
-  } catch {
-    // 降级：仅返回截图，元素列表为空
-  }
+    let seeResult = {
+      elements: [] as PeekabooElement[],
+      elementCount: 0,
+      interactableCount: 0,
+      snapshotId: "",
+    };
+    try {
+      seeResult = seeElements(cfg);
+    } catch {
+      // 降级：仅返回截图，元素列表为空
+    }
 
-  return {
-    screenshot: scr,
-    elements: seeResult.elements,
-    interactableElements: seeResult.elements.filter((e) => e.is_actionable),
-    elementCount: seeResult.elementCount,
-    interactableCount: seeResult.interactableCount,
-    snapshotId: seeResult.snapshotId,
-  };
+    return {
+      screenshot: scr,
+      elements: seeResult.elements,
+      interactableElements: seeResult.elements.filter((e) => e.is_actionable),
+      elementCount: seeResult.elementCount,
+      interactableCount: seeResult.interactableCount,
+      snapshotId: seeResult.snapshotId,
+    };
+  });
 }
 
 /**
@@ -308,13 +344,15 @@ export async function getCurrentElements(cfg: PeekabooConfig): Promise<ImSeeResu
  * 全选 + Delete。
  */
 export async function clearInput(cfg: PeekabooConfig): Promise<void> {
-  activateApp(cfg);
-  await sleep(800);
+  return withRestore(cfg, async () => {
+    activateApp(cfg);
+    await sleep(800);
 
-  clickCoords(INPUT_BOX.x, INPUT_BOX.y, cfg);
-  await sleep(300);
+    clickCoords(INPUT_BOX.x, INPUT_BOX.y, cfg);
+    await sleep(300);
 
-  hotkey("cmd,a", cfg);
-  await sleep(100);
-  pressKey("delete", cfg);
+    hotkey("cmd,a", cfg);
+    await sleep(100);
+    pressKey("delete", cfg);
+  });
 }

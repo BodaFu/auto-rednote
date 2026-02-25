@@ -82,6 +82,12 @@ export default function register(api: OpenClawPluginApi) {
     desktopAppName?: string;
     desktopWindowTitle?: string;
     desktopProcessName?: string;
+    /**
+     * 操作小红书 App 完成后是否自动切回原前台 App。
+     * - true（默认）：个人电脑使用，操作完立刻切回，桌面短暂闪烁约 1-2 秒
+     * - false：专用设备部署（无人值守），操作完保持在小红书界面
+     */
+    desktopRestoreApp?: boolean;
   };
 
   const dbPath = pluginCfg.dbPath;
@@ -94,6 +100,10 @@ export default function register(api: OpenClawPluginApi) {
     ...(pluginCfg.desktopAppName ? { appName: pluginCfg.desktopAppName } : {}),
     ...(pluginCfg.desktopWindowTitle ? { windowTitle: pluginCfg.desktopWindowTitle } : {}),
     ...(pluginCfg.desktopProcessName ? { processName: pluginCfg.desktopProcessName } : {}),
+    // desktopRestoreApp 未配置时使用默认值 true（个人电脑友好模式）
+    ...(pluginCfg.desktopRestoreApp !== undefined
+      ? { restoreApp: pluginCfg.desktopRestoreApp }
+      : {}),
   };
 
   // 初始化 SQLite 状态数据库

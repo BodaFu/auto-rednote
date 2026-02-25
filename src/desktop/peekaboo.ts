@@ -42,6 +42,16 @@ export interface PeekabooConfig {
    * 默认：{ x: 0, y: 33, width: 1512, height: 949 }（全屏 1512×982，顶部菜单栏 33px）
    */
   windowRegion?: { x: number; y: number; width: number; height: number };
+  /**
+   * 操作完成后是否自动切回原来的前台 App。
+   *
+   * - true（默认）：适合在个人电脑上使用，Liko 操作完小红书后立刻切回用户正在用的 App，
+   *   桌面只会短暂闪烁约 1-2 秒。
+   * - false：适合专用设备部署（无人值守服务器/专用 Mac），操作完保持在小红书界面。
+   *
+   * 对应 openclaw.json 插件配置：`"desktopRestoreApp": false`
+   */
+  restoreApp: boolean;
 }
 
 export const DEFAULT_PEEKABOO_CONFIG: PeekabooConfig = {
@@ -50,6 +60,7 @@ export const DEFAULT_PEEKABOO_CONFIG: PeekabooConfig = {
   windowTitle: "小红书",
   processName: "discover",
   windowRegion: { x: 0, y: 33, width: 1512, height: 949 },
+  restoreApp: true,
 };
 
 // ============================================================================
@@ -143,6 +154,32 @@ function runPeekaboo(
 // ============================================================================
 
 /**
+ * 获取当前前台 App 的名称（用于操作完成后切回）。
+ * 如果无法获取，返回 null（此时 restoreApp 的切回操作将跳过）。
+ */
+export function getFrontmostApp(): string | null {
+  const result = spawnSync(
+    "/usr/bin/osascript",
+    ["-e", 'tell application "System Events" to get name of first process whose frontmost is true'],
+    { encoding: "utf-8", timeout: 3_000 },
+  );
+  const name = result.stdout?.trim();
+  return name && result.status === 0 ? name : null;
+}
+
+/**
+ * 将指定 App 切回前台（操作完成后恢复用户环境）。
+ * 用 `tell application X to activate`（非全屏 App 不需要 System Events）。
+ */
+export function restoreFrontmostApp(appName: string): void {
+  spawnSync(
+    "/usr/bin/osascript",
+    ["-e", `tell application "${appName}" to activate`],
+    { encoding: "utf-8", timeout: 3_000 },
+  );
+}
+
+/**
  * 将 App 带到前台并切换到其所在 Space。
  *
  * 使用 System Events 的 `set frontmost to true`，
@@ -183,12 +220,13 @@ export function sleep(ms: number): Promise<void> {
  *
  * 截取区域基于 cfg.windowRegion（默认 x=0, y=33, w=1512, h=949）。
  * 坐标系：截图像素坐标与 clickCoords 坐标一致（x=0,y=0 为窗口内容左上角）。
+ *
+ * 注意：切回原 App 由调用方（im.ts 的操作函数）负责，不在此处处理，
+ * 以便在整个操作序列（activate → click → type → screenshot）完成后统一切回。
  */
 export function screenshot(cfg: PeekabooConfig): ScreenshotResult {
-  // 切换到小红书 Space，等待动画完成
   activateApp(cfg);
-  const waitResult = spawnSync("sleep", ["0.8"], { timeout: 2_000 });
-  void waitResult;
+  spawnSync("sleep", ["0.8"], { timeout: 2_000 });
 
   const path = join(tmpdir(), `xhs-desktop-${Date.now()}.png`);
   const region = cfg.windowRegion ?? DEFAULT_PEEKABOO_CONFIG.windowRegion!;
