@@ -1,15 +1,14 @@
 /**
  * browser.ts - 封装对 openclaw browser control 的调用
  *
- * 通过动态 import openclaw 内部 browser client 函数实现进程内调用。
- * 所有函数传入 baseUrl=undefined，触发 fetchBrowserJson 的进程内路由分支，
- * 无需独立 HTTP 端口。
+ * 直接通过原生 fetch() 调用 Gateway 的浏览器控制 HTTP 服务，
+ * 使用 process.env.OPENCLAW_GATEWAY_TOKEN 进行认证。
+ *
+ * 完全不依赖 jiti 动态导入 openclaw 内部模块，
+ * 从根本上避免模块实例隔离导致的 Playwright 连接冲突。
  *
  * 默认使用 "openclaw" profile（openclaw 管理的隔离浏览器）。
  */
-
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 
 // ============================================================================
 // 配置
@@ -18,54 +17,61 @@ import { fileURLToPath } from "node:url";
 const XHS_HOME = "https://www.xiaohongshu.com";
 const DEFAULT_PROFILE = "openclaw";
 
+const GATEWAY_PORT = Number(process.env.OPENCLAW_GATEWAY_PORT) || 18789;
+const BROWSER_CONTROL_PORT = GATEWAY_PORT + 2;
+const BROWSER_BASE_URL = `http://127.0.0.1:${BROWSER_CONTROL_PORT}`;
+
 // ============================================================================
-// 动态加载 openclaw 内部 browser client
-//
-// openclaw 的 browser client 函数接受 baseUrl: string | undefined。
-// 传 undefined 时，fetchBrowserJson 走进程内路由（直接调用 dispatcher），
-// 不需要独立 HTTP 端口。
+// HTTP 底层
 // ============================================================================
 
-type BrowserClientModule = typeof import("../../src/browser/client.js");
-type BrowserActionsModule = typeof import("../../src/browser/client-actions-core.js");
-type BrowserObserveModule = typeof import("../../src/browser/client-actions-observe.js");
-
-let _client: BrowserClientModule | null = null;
-let _actions: BrowserActionsModule | null = null;
-let _observe: BrowserObserveModule | null = null;
-
-/**
- * openclaw 根目录（在模块加载时计算）。
- *
- * 此文件位于 extensions/auto-rednote/src/browser.ts，
- * openclaw 根目录 = 上 3 层目录（src/ -> auto-rednote/ -> extensions/ -> openclaw/）。
- *
- * 在 gateway 进程中通过 jiti 加载此 .ts 文件时，
- * import.meta.url 指向源文件的实际路径，因此相对路径推算是可靠的。
- */
-// browser.ts -> src/ -> auto-rednote/ -> extensions/ -> openclaw/
-const OC_BASE = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-
-async function getClient(): Promise<BrowserClientModule> {
-  if (_client) return _client;
-  _client = (await import(`${OC_BASE}/src/browser/client.ts`)) as BrowserClientModule;
-  return _client;
+function getAuthToken(): string | undefined {
+  return process.env.OPENCLAW_GATEWAY_TOKEN?.trim() || undefined;
 }
 
-async function getActions(): Promise<BrowserActionsModule> {
-  if (_actions) return _actions;
-  _actions = (await import(
-    `${OC_BASE}/src/browser/client-actions-core.ts`
-  )) as BrowserActionsModule;
-  return _actions;
+function buildHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...extra };
+  const token = getAuthToken();
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  return headers;
 }
 
-async function getObserve(): Promise<BrowserObserveModule> {
-  if (_observe) return _observe;
-  _observe = (await import(
-    `${OC_BASE}/src/browser/client-actions-observe.ts`
-  )) as BrowserObserveModule;
-  return _observe;
+function profileQuery(profile?: string): string {
+  const p = profile ?? DEFAULT_PROFILE;
+  return `?profile=${encodeURIComponent(p)}`;
+}
+
+async function browserFetch<T>(
+  path: string,
+  opts?: { method?: string; body?: unknown; timeoutMs?: number },
+): Promise<T> {
+  const timeoutMs = opts?.timeoutMs ?? 20000;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
+
+  try {
+    const init: RequestInit = {
+      method: opts?.method ?? "GET",
+      signal: ctrl.signal,
+      headers: buildHeaders(
+        opts?.body !== undefined ? { "Content-Type": "application/json" } : undefined,
+      ),
+    };
+    if (opts?.body !== undefined) {
+      init.body = JSON.stringify(opts.body);
+    }
+
+    const res = await fetch(`${BROWSER_BASE_URL}${path}`, init);
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(text || `HTTP ${res.status}`);
+    }
+    return (await res.json()) as T;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ============================================================================
@@ -75,21 +81,29 @@ async function getObserve(): Promise<BrowserObserveModule> {
 export async function getTabs(
   profile?: string,
 ): Promise<Array<{ targetId: string; url: string; title?: string; type?: string }>> {
-  const c = await getClient();
-  return c.browserTabs(undefined, { profile: profile ?? DEFAULT_PROFILE });
+  const res = await browserFetch<{ tabs: Array<{ targetId: string; url: string; title?: string; type?: string }> }>(
+    `/tabs${profileQuery(profile)}`,
+    { timeoutMs: 3000 },
+  );
+  return res.tabs;
 }
 
 export async function openTab(
   url: string,
   profile?: string,
 ): Promise<{ targetId: string; url: string }> {
-  const c = await getClient();
-  return c.browserOpenTab(undefined, url, { profile: profile ?? DEFAULT_PROFILE });
+  return browserFetch(`/tabs/open${profileQuery(profile)}`, {
+    method: "POST",
+    body: { url },
+    timeoutMs: 15000,
+  });
 }
 
 export async function closeTab(targetId: string, profile?: string): Promise<void> {
-  const c = await getClient();
-  return c.browserCloseTab(undefined, targetId, { profile: profile ?? DEFAULT_PROFILE });
+  await browserFetch(`/tabs/${encodeURIComponent(targetId)}${profileQuery(profile)}`, {
+    method: "DELETE",
+    timeoutMs: 5000,
+  });
 }
 
 // ============================================================================
@@ -101,8 +115,11 @@ export async function navigate(
   url: string,
   profile?: string,
 ): Promise<{ targetId: string; url: string }> {
-  const a = await getActions();
-  return a.browserNavigate(undefined, { url, targetId, profile: profile ?? DEFAULT_PROFILE });
+  return browserFetch(`/navigate${profileQuery(profile)}`, {
+    method: "POST",
+    body: { url, targetId },
+    timeoutMs: 20000,
+  });
 }
 
 export type ActRequest =
@@ -145,9 +162,10 @@ export async function act(
   req: ActRequest,
   profile?: string,
 ): Promise<{ ok?: boolean; result?: unknown }> {
-  const a = await getActions();
-  return a.browserAct(undefined, req as Parameters<typeof a.browserAct>[1], {
-    profile: profile ?? DEFAULT_PROFILE,
+  return browserFetch(`/act${profileQuery(profile)}`, {
+    method: "POST",
+    body: req,
+    timeoutMs: 20000,
   });
 }
 
@@ -158,13 +176,12 @@ export async function snapshot(
   nodes?: Array<{ ref: string; role: string; name: string; value?: string }>;
   content?: string;
 }> {
-  const c = await getClient();
-  return c.browserSnapshot(undefined, {
-    format: opts?.format ?? "aria",
-    targetId,
-    selector: opts?.selector,
-    profile: opts?.profile ?? DEFAULT_PROFILE,
-  });
+  const params = new URLSearchParams();
+  params.set("format", opts?.format ?? "aria");
+  params.set("targetId", targetId);
+  if (opts?.selector) params.set("selector", opts.selector);
+  params.set("profile", opts?.profile ?? DEFAULT_PROFILE);
+  return browserFetch(`/snapshot?${params.toString()}`, { timeoutMs: 20000 });
 }
 
 // ============================================================================
@@ -202,31 +219,55 @@ export async function sleep(ms: number): Promise<void> {
 }
 
 // ============================================================================
-// 高级封装：SPA 预热 + 导航
+// 导航保护：防止 xiaohongshu SPA 自动跳转到非 creator 页面
 //
-// 小红书是 SPA，直接导航目标页时 window.__INITIAL_STATE__ 可能未初始化。
-// 策略：先确保有一个已访问首页的 tab，再导航到目标页。
+// creator.xiaohongshu.com 页面有前端脚本会自动导航到
+// www.xiaohongshu.com/explore/... 上的笔记（通知/推荐），
+// 导致发布流程中途页面丢失。
+// 安装拦截器阻止所有非 creator 域名的 <a> 点击跳转。
 // ============================================================================
 
-let _warmupTabId: string | null = null;
+async function installNavigationGuard(targetId: string, profile?: string): Promise<void> {
+  await evaluate(
+    targetId,
+    `() => {
+      if (window.__oc_nav_guard) return;
+      window.__oc_nav_guard = true;
+      document.addEventListener('click', (e) => {
+        const a = e.target.closest ? e.target.closest('a') : null;
+        if (a && a.href && !a.href.includes('creator.xiaohongshu.com') && a.href !== '#' && !a.href.startsWith('javascript:')) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      }, true);
+      const origOpen = window.open;
+      window.open = function(...args) {
+        const url = String(args[0] || '');
+        if (url && !url.includes('creator.xiaohongshu.com')) return null;
+        return origOpen.apply(this, args);
+      };
+    }`,
+    profile,
+  );
+}
+
+// ============================================================================
+// 高级封装：SPA 导航
+//
+// 策略：复用或新建 tab → 导航到 creator 发布页 → 安装导航保护
+// ============================================================================
 
 export async function getOrCreateXhsTab(profile?: string): Promise<string> {
   const tabs = await getTabs(profile);
-
-  // 优先复用已有的小红书 tab
   const existing = tabs.find(
-    (t) => t.url.includes("xiaohongshu.com") && t.type !== "background_page",
+    (t) => t.url.includes("xiaohongshu.com") && t.type !== "background_page" && t.type !== "service_worker",
   );
-  if (existing) {
-    _warmupTabId = existing.targetId;
-    return existing.targetId;
-  }
+  if (existing) return existing.targetId;
 
-  // 新建 tab 并访问首页（SPA 预热）
   const tab = await openTab(XHS_HOME, profile);
-  _warmupTabId = tab.targetId;
   await waitForLoad(tab.targetId, 20000, profile);
   await sleep(1500);
+  await installNavigationGuard(tab.targetId, profile);
   return tab.targetId;
 }
 
@@ -234,22 +275,27 @@ export async function navigateWithWarmup(
   url: string,
   profile?: string,
 ): Promise<{ targetId: string }> {
-  const targetId = await getOrCreateXhsTab(profile);
-
-  // 如果当前 tab 不在小红书，先访问首页预热
   const tabs = await getTabs(profile);
-  const tab = tabs.find((t) => t.targetId === targetId);
-  const isOnXhs = tab?.url.includes("xiaohongshu.com");
+  const pageTabs = tabs.filter(
+    (t) => t.url.includes("xiaohongshu.com") && t.type !== "background_page" && t.type !== "service_worker",
+  );
 
-  if (!isOnXhs) {
-    await navigate(targetId, XHS_HOME, profile);
-    await waitForLoad(targetId, 20000, profile);
-    await sleep(1000);
+  let targetId: string;
+
+  if (pageTabs.length > 0) {
+    targetId = pageTabs[0]!.targetId;
+    // 关闭多余标签页，避免干扰
+    for (let i = 1; i < pageTabs.length; i++) {
+      await closeTab(pageTabs[i]!.targetId, profile).catch(() => null);
+    }
+  } else {
+    const tab = await openTab("about:blank", profile);
+    targetId = tab.targetId;
   }
 
-  // 导航到目标页（忽略超时错误，页面可能加载慢但内容已可用）
   await navigate(targetId, url, profile).catch(() => null);
-  await sleep(1500);
+  await sleep(2000);
+  await installNavigationGuard(targetId, profile);
 
   return { targetId };
 }
@@ -356,15 +402,18 @@ export async function findRefByText(
 export async function armFileChooser(
   targetId: string,
   files: string[],
-  ref?: string,
-  profile?: string,
+  opts?: { ref?: string; element?: string; inputRef?: string; profile?: string },
 ): Promise<void> {
-  const a = await getActions();
-  await a.browserArmFileChooser(undefined, {
-    targetId,
-    files,
-    ref,
-    profile: profile ?? DEFAULT_PROFILE,
+  await browserFetch(`/hooks/file-chooser${profileQuery(opts?.profile)}`, {
+    method: "POST",
+    body: {
+      targetId,
+      paths: files,
+      ref: opts?.ref,
+      inputRef: opts?.inputRef,
+      element: opts?.element,
+    },
+    timeoutMs: 20000,
   });
 }
 
@@ -384,16 +433,42 @@ export async function waitForResponseBody(
   timeoutMs = 15000,
   profile?: string,
 ): Promise<ResponseBodyResult> {
-  const o = await getObserve();
-  const res = await o.browserResponseBody(undefined, {
-    url: urlPattern,
-    targetId,
-    timeoutMs,
-    profile: profile ?? DEFAULT_PROFILE,
+  const res = await browserFetch<{
+    ok: boolean;
+    targetId: string;
+    response: { url: string; status?: number; body: string };
+  }>(`/response/body${profileQuery(profile)}`, {
+    method: "POST",
+    body: { targetId, url: urlPattern, timeoutMs },
+    timeoutMs: timeoutMs + 5000,
   });
   return {
     url: res.response.url,
     status: res.response.status,
     body: res.response.body,
   };
+}
+
+// ============================================================================
+// 错误检测 & Tab 健康检查
+// ============================================================================
+
+export function isTabLostError(err: unknown): boolean {
+  const msg = String(err).toLowerCase();
+  return (
+    msg.includes("tab not found") ||
+    msg.includes("no attached chrome tabs") ||
+    msg.includes("extension disconnected") ||
+    msg.includes("browser not started") ||
+    (msg.includes("can't reach") && msg.includes("browser control"))
+  );
+}
+
+export async function isTabAlive(targetId: string, profile?: string): Promise<boolean> {
+  try {
+    const tabs = await getTabs(profile);
+    return tabs.some((t) => t.targetId === targetId);
+  } catch {
+    return false;
+  }
 }

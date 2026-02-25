@@ -4,7 +4,10 @@
  * 通过复用 openclaw browser 工具（host profile，共享已登录的 Chrome）
  * 实现小红书网页端的完整操作能力。
  *
- * 工具列表（19个）：
+ * 同时通过 peekaboo CLI 控制小红书桌面 App（iOS on macOS）
+ * 实现网页端不支持的私信（IM）操作能力。
+ *
+ * 工具列表（25个）：
  * 账号工具：
  * - xhs_check_login           检查登录状态
  * - xhs_get_qrcode            获取登录二维码
@@ -28,6 +31,14 @@
  * - xhs_notification_stats    获取通知状态统计
  * 发布工具：
  * - xhs_publish               发布笔记（图文 / 视频）
+ * 桌面 IM 工具（私信 / 群聊，需要 peekaboo + 小红书桌面 App）：
+ * - xhs_desktop_im_unread     扫描未读私信（心跳专用，返回截图供视觉分析）
+ * - xhs_desktop_im_inbox      查看消息收件箱（返回截图）
+ * - xhs_desktop_im_open       打开指定私信对话
+ * - xhs_desktop_im_send       在当前对话中发送私信
+ * - xhs_desktop_im_back       返回上一页
+ * - xhs_desktop_im_see        获取当前 UI 元素列表（调试 / 动态定位）
+ * - xhs_desktop_screenshot    截图当前小红书桌面 App 界面
  */
 
 import { Type } from "@sinclair/typebox";
@@ -51,16 +62,39 @@ import {
 } from "./src/actions/notifications.js";
 import { publishNote } from "./src/actions/publish.js";
 import { initState } from "./src/state.js";
+import {
+  scanUnread,
+  getInbox,
+  openConversation,
+  sendMessage,
+  navigateBack,
+  takeScreenshot,
+  getCurrentElements,
+} from "./src/desktop/im.js";
+import { DEFAULT_PEEKABOO_CONFIG } from "./src/desktop/peekaboo.js";
 
 export default function register(api: OpenClawPluginApi) {
   // 初始化配置
   const pluginCfg = (api.pluginConfig ?? {}) as {
     dbPath?: string;
     browserProfile?: string;
+    peekabooPath?: string;
+    desktopAppName?: string;
+    desktopWindowTitle?: string;
+    desktopProcessName?: string;
   };
 
   const dbPath = pluginCfg.dbPath;
   const browserProfile = pluginCfg.browserProfile;
+
+  // 桌面端配置（peekaboo）
+  const peekabooConfig = {
+    ...DEFAULT_PEEKABOO_CONFIG,
+    ...(pluginCfg.peekabooPath ? { bin: pluginCfg.peekabooPath } : {}),
+    ...(pluginCfg.desktopAppName ? { appName: pluginCfg.desktopAppName } : {}),
+    ...(pluginCfg.desktopWindowTitle ? { windowTitle: pluginCfg.desktopWindowTitle } : {}),
+    ...(pluginCfg.desktopProcessName ? { processName: pluginCfg.desktopProcessName } : {}),
+  };
 
   // 初始化 SQLite 状态数据库
   try {
@@ -631,6 +665,295 @@ export default function register(api: OpenClawPluginApi) {
         return {
           content: [{ type: "text" as const, text: text }],
           details: result,
+        };
+      },
+    },
+    { optional: true },
+  );
+
+  // ============================================================================
+  // 桌面 IM 工具（私信 / 群聊）
+  // 依赖：peekaboo CLI + 小红书桌面 App（iOS on macOS）
+  // 网页版不支持消息页私信/群聊，必须使用桌面 App 操作。
+  // ============================================================================
+
+  api.registerTool(
+    {
+      name: "xhs_desktop_im_unread",
+      description: `扫描小红书桌面 App 中的未读私信（心跳专用）。
+
+导航到「消息」页并截图，返回：
+- screenshot（图片）：消息列表界面，Agent 需视觉分析识别哪些对话有未读消息
+- unreadBadges：AX 树检测到的未读角标（如底部 Tab 上的"2条未读"）
+
+心跳使用流程：
+1. 调用此工具 → 获得消息列表截图
+2. 视觉分析截图，找到有未读的对话及其大致坐标（y 值）
+3. 调用 xhs_desktop_im_open { x, y } 打开对话
+4. 视觉读取消息内容（截图返回）
+5. 调用 xhs_desktop_im_send 发送回复`,
+      parameters: Type.Object({}),
+      async execute(_id: string, _params: Record<string, unknown>) {
+        const result = await scanUnread(peekabooConfig);
+        const summary = result.hasUnread
+          ? `检测到 ${result.badgeCount} 个未读角标，消息列表截图已返回，请视觉分析确认具体对话`
+          : "当前无未读消息角标（消息列表截图已返回，请视觉确认）";
+        return {
+          content: [
+            { type: "text" as const, text: summary },
+            {
+              type: "image" as const,
+              data: result.screenshot.base64,
+              mimeType: "image/png" as const,
+            },
+          ],
+          details: {
+            hasUnread: result.hasUnread,
+            badgeCount: result.badgeCount,
+            unreadBadges: result.unreadBadges,
+            screenshotPath: result.screenshot.path,
+          },
+        };
+      },
+    },
+    { optional: true },
+  );
+
+  api.registerTool(
+    {
+      name: "xhs_desktop_im_inbox",
+      description: `查看小红书桌面 App 消息收件箱（返回截图）。
+
+导航到「消息」Tab，截图返回全量消息列表。
+与 xhs_desktop_im_unread 不同，此工具不过滤未读状态，适合随时查看当前收件箱。`,
+      parameters: Type.Object({}),
+      async execute(_id: string, _params: Record<string, unknown>) {
+        const scr = await getInbox(peekabooConfig);
+        return {
+          content: [
+            { type: "text" as const, text: "消息收件箱截图已返回" },
+            {
+              type: "image" as const,
+              data: scr.base64,
+              mimeType: "image/png" as const,
+            },
+          ],
+          details: { screenshotPath: scr.path },
+        };
+      },
+    },
+    { optional: true },
+  );
+
+  api.registerTool(
+    {
+      name: "xhs_desktop_im_open",
+      description: `打开小红书桌面 App 中的指定私信对话。
+
+支持两种定位方式（二选一）：
+- elemId：从 xhs_desktop_im_see 或 xhs_desktop_im_unread 的 unreadBadges 获取的元素 ID（最稳定）
+- x + y：从消息列表截图中视觉识别的坐标（窗口相对像素坐标，截图像素 = 点击坐标）
+
+打开后返回对话截图，Agent 需视觉分析读取消息内容。`,
+      parameters: Type.Object({
+        elemId: Type.Optional(
+          Type.String({
+            description:
+              "元素 ID（来自 xhs_desktop_im_unread.unreadBadges 或 xhs_desktop_im_see），优先使用",
+          }),
+        ),
+        x: Type.Optional(
+          Type.Number({
+            description: "点击坐标 X（截图像素坐标，elemId 不可用时使用）",
+          }),
+        ),
+        y: Type.Optional(
+          Type.Number({
+            description: "点击坐标 Y（截图像素坐标，elemId 不可用时使用）",
+          }),
+        ),
+        waitMs: Type.Optional(
+          Type.Number({ description: "点击后等待页面加载的毫秒数（默认 1200）" }),
+        ),
+      }),
+      async execute(_id: string, params: Record<string, unknown>) {
+        const elemId = typeof params.elemId === "string" ? params.elemId : undefined;
+        const x = typeof params.x === "number" ? params.x : undefined;
+        const y = typeof params.y === "number" ? params.y : undefined;
+        const waitMs = typeof params.waitMs === "number" ? params.waitMs : 1200;
+
+        if (!elemId && (x === undefined || y === undefined)) {
+          throw new Error("必须提供 elemId 或 (x, y) 坐标之一");
+        }
+
+        const result = await openConversation({ elemId, x, y }, peekabooConfig, waitMs);
+        const locDesc = result.clickedAt
+          ? `点击位置 (${result.clickedAt.x}, ${result.clickedAt.y})`
+          : "已点击";
+        return {
+          content: [
+            { type: "text" as const, text: `对话已打开（${locDesc}），截图已返回，请视觉分析消息内容` },
+            {
+              type: "image" as const,
+              data: result.screenshot.base64,
+              mimeType: "image/png" as const,
+            },
+          ],
+          details: {
+            clickedAt: result.clickedAt,
+            screenshotPath: result.screenshot.path,
+          },
+        };
+      },
+    },
+    { optional: true },
+  );
+
+  api.registerTool(
+    {
+      name: "xhs_desktop_im_send",
+      description: `在小红书桌面 App 当前打开的私信对话中发送一条消息。
+
+前置条件：必须已通过 xhs_desktop_im_open 打开了某个对话（底部输入框可见）。
+发送后返回截图，Agent 可视觉确认消息是否出现在对话中。
+
+发送流程：点击输入框 → 输入文字 → 按 Return 发送。`,
+      parameters: Type.Object({
+        text: Type.String({ description: "要发送的消息内容（支持中文）" }),
+      }),
+      async execute(_id: string, params: Record<string, unknown>) {
+        const text = String(params.text ?? "").trim();
+        if (!text) throw new Error("text 不能为空");
+
+        const result = await sendMessage(text, peekabooConfig);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `消息已发送：「${text.slice(0, 50)}${text.length > 50 ? "…" : ""}」`,
+            },
+            {
+              type: "image" as const,
+              data: result.screenshot.base64,
+              mimeType: "image/png" as const,
+            },
+          ],
+          details: {
+            sentText: text,
+            screenshotPath: result.screenshot.path,
+          },
+        };
+      },
+    },
+    { optional: true },
+  );
+
+  api.registerTool(
+    {
+      name: "xhs_desktop_im_back",
+      description: `在小红书桌面 App 中点击返回按钮（左上角 <）导航到上一页。
+用于从对话页返回消息列表，或从消息列表返回到首页。`,
+      parameters: Type.Object({}),
+      async execute(_id: string, _params: Record<string, unknown>) {
+        const scr = await navigateBack(peekabooConfig);
+        return {
+          content: [
+            { type: "text" as const, text: "已返回上一页，截图已返回" },
+            {
+              type: "image" as const,
+              data: scr.base64,
+              mimeType: "image/png" as const,
+            },
+          ],
+          details: { screenshotPath: scr.path },
+        };
+      },
+    },
+    { optional: true },
+  );
+
+  api.registerTool(
+    {
+      name: "xhs_desktop_im_see",
+      description: `获取小红书桌面 App 当前界面的 UI 可交互元素列表（含截图）。
+
+返回：
+- 截图（当前界面）
+- elements：所有 UI 元素（含角色、标签、是否可交互）
+- interactableElements：仅可交互元素
+
+主要用途：
+1. 查找未读角标的 elemId（如"2条未读"的 elem_8），用于 xhs_desktop_im_open
+2. 调试当前 App 状态
+3. 验证当前是否在正确页面
+
+注意：小红书 iOS App 的 AX 树质量较低，多数元素 label 为"按钮"/"文本"，
+有意义的标签通常是导航角标（"X条未读"）。`,
+      parameters: Type.Object({}),
+      async execute(_id: string, _params: Record<string, unknown>) {
+        const result = await getCurrentElements(peekabooConfig);
+        const summary =
+          `共 ${result.elementCount} 个元素，${result.interactableCount} 个可交互。` +
+          (result.interactableElements.filter((e) => e.label && !["按钮", "文本", "组", "标题"].includes(e.label)).length > 0
+            ? `\n有意义的元素：${result.interactableElements.filter((e) => e.label && !["按钮", "文本", "组", "标题"].includes(e.label)).map((e) => `${e.id}(${e.label})`).join(", ")}`
+            : "");
+        return {
+          content: [
+            { type: "text" as const, text: summary },
+            {
+              type: "image" as const,
+              data: result.screenshot.base64,
+              mimeType: "image/png" as const,
+            },
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                {
+                  snapshotId: result.snapshotId,
+                  interactableElements: result.interactableElements.map((e) => ({
+                    id: e.id,
+                    role: e.role,
+                    label: e.label,
+                    description: e.description,
+                  })),
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+          details: {
+            snapshotId: result.snapshotId,
+            elementCount: result.elementCount,
+            interactableCount: result.interactableCount,
+            interactableElements: result.interactableElements,
+            screenshotPath: result.screenshot.path,
+          },
+        };
+      },
+    },
+    { optional: true },
+  );
+
+  api.registerTool(
+    {
+      name: "xhs_desktop_screenshot",
+      description: `截图小红书桌面 App 当前界面。
+无需激活 App，直接捕获当前窗口内容。
+适用于：确认当前页面状态、调试交互结果、在不需要完整 IM 流程时快速查看界面。`,
+      parameters: Type.Object({}),
+      async execute(_id: string, _params: Record<string, unknown>) {
+        const scr = takeScreenshot(peekabooConfig);
+        return {
+          content: [
+            { type: "text" as const, text: `截图已返回（路径: ${scr.path}）` },
+            {
+              type: "image" as const,
+              data: scr.base64,
+              mimeType: "image/png" as const,
+            },
+          ],
+          details: { screenshotPath: scr.path },
         };
       },
     },

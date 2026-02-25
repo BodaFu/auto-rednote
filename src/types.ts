@@ -233,3 +233,32 @@ export interface ToolResult {
   content: Array<{ type: "text"; text: string }>;
   details?: unknown;
 }
+
+// ============================================================================
+// 桌面端 IM 类型（小红书 iOS on macOS App）
+// ============================================================================
+
+/**
+ * 未读消息扫描结果（xhs_desktop_im_unread 返回）。
+ * 用于心跳循环，Agent 需结合截图视觉分析判断具体哪条对话有未读消息。
+ */
+export interface DesktopImUnreadResult {
+  /**
+   * AX 树中检测到的未读角标（通常是底部导航 Tab 角标）。
+   * 例：[{ elemId: "elem_8", label: "2条未读", description: "" }]
+   * 可用 elemId 直接调用 xhs_desktop_im_open 打开对话。
+   */
+  unreadBadges: Array<{ elemId: string; label: string; description: string }>;
+  hasUnread: boolean;
+  badgeCount: number;
+  screenshotPath: string;
+}
+
+/** peekaboo UI 元素（xhs_desktop_im_see 返回）*/
+export interface DesktopElement {
+  id: string;
+  role: string;
+  label?: string;
+  description?: string;
+  is_actionable?: boolean;
+}

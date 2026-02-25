@@ -210,7 +210,7 @@ Agent flow:
 
 ## Technical notes
 
-- **In-process browser control**: The extension imports OpenClaw's internal browser client directly (via `jiti` TypeScript loader). No HTTP port is needed — all browser calls go through OpenClaw's in-process dispatcher.
+- **HTTP browser control**: The extension communicates with the OpenClaw Gateway's browser control HTTP service using native `fetch()`. This avoids `jiti` module isolation issues and ensures stable Playwright connections through the Gateway's single managed browser instance.
 - **SPA warm-up**: Xiaohongshu is a React SPA. The extension ensures Chrome has visited the homepage to initialize `window.__INITIAL_STATE__` before extracting data.
 - **Data extraction**: Prioritizes structured data from `window.__INITIAL_STATE__`; falls back to DOM parsing.
 - **API interception**: Notification fetching intercepts `/api/sns/web/v1/you/mentions`. Comment reply injects a continuous `fetch`/XHR interceptor (`window.__commentAPIEntries`) to handle virtualized rendering and multi-level threads.

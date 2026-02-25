@@ -210,7 +210,7 @@ Agent 调用流程：
 
 ## 技术说明
 
-- **进程内 browser control**：插件通过 `jiti` TypeScript 加载器直接 import OpenClaw 内部的 browser client，所有 browser 调用走 OpenClaw 的进程内 dispatcher，无需独立 HTTP 端口。
+- **HTTP 浏览器控制**：插件通过原生 `fetch()` 直接调用 OpenClaw Gateway 的浏览器控制 HTTP 服务，避免 `jiti` 模块隔离导致的 Playwright 连接冲突，由 Gateway 统一管理浏览器实例。
 - **SPA 预热**：小红书是 React SPA，插件会确保 Chrome 已访问首页完成 `window.__INITIAL_STATE__` 初始化，再提取数据。
 - **数据提取**：优先从 `window.__INITIAL_STATE__` 提取结构化数据，降级到 DOM 解析。
 - **API 拦截**：通知获取拦截 `/api/sns/web/v1/you/mentions`。评论回复在页面注入持续拦截器（`window.__commentAPIEntries`），处理虚拟化渲染和多级评论结构。
