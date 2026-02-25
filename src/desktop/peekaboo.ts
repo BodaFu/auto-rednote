@@ -376,11 +376,21 @@ export function typeText(text: string, cfg: PeekabooConfig): void {
 /**
  * 按下单个按键（如 "return", "delete", "escape"）。
  *
- * peekaboo press 语法：peekaboo press <keys> --app <app>
- * keys 是位置参数。
+ * return 键使用 osascript keystroke 发给目标进程，
+ * 因为 peekaboo press return 在 iOS App 的某些输入框（如陌生人消息）中无法触发发送。
+ * 其他按键仍通过 peekaboo press。
  */
 export function pressKey(key: string, cfg: PeekabooConfig): void {
-  runPeekaboo(["press", key, "--app", cfg.appName], cfg, { json: false });
+  if (key === "return") {
+    // osascript keystroke return 直接发给目标进程，可靠触发 iOS App 输入框发送
+    spawnSync(
+      "/usr/bin/osascript",
+      ["-e", `tell application "System Events" to tell application process "${cfg.processName}" to keystroke return`],
+      { encoding: "utf-8", timeout: 3_000 },
+    );
+  } else {
+    runPeekaboo(["press", key, "--app", cfg.appName], cfg, { json: false });
+  }
 }
 
 /**

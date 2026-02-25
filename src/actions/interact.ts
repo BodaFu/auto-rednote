@@ -704,7 +704,7 @@ async function scrollToComment(
   commentId: string,
   profile?: string,
 ): Promise<boolean> {
-  const maxScrollRounds = 100;
+  const maxScrollRounds = 200;
 
   // 先滚动到评论区
   await evaluate(
@@ -739,9 +739,11 @@ async function scrollToComment(
     return false;
   }
 
-  let lastCommentCount = 0;
   let lastAPICount = initialEntries.length;
-  let stagnantChecks = 0;
+  // 用 API 批次数量来判断停滞（而非 DOM 评论数），避免虚拟化导致的误判
+  let stagnantAPIChecks = 0;
+  // 评论区为空时的快速退出计数
+  let emptyAreaChecks = 0;
 
   for (let round = 0; round < maxScrollRounds; round++) {
     // 1. DOM 查找（scrollIntoView 触发虚拟化渲染）
@@ -761,7 +763,10 @@ async function scrollToComment(
     const currentEntries = await readPageAPIEntries(targetId, profile);
     if (currentEntries.length > lastAPICount) {
       lastAPICount = currentEntries.length;
+      stagnantAPIChecks = 0;
       if (checkCommentInEntries(currentEntries, commentId) === "not_found") return false;
+    } else {
+      stagnantAPIChecks++;
     }
 
     // 3. 检查是否到达底部
@@ -772,22 +777,23 @@ async function scrollToComment(
     );
     if (isEnd === true) break;
 
-    // 4. 停滞检测
-    const currentCount = (await evaluate(
+    // 4. 停滞检测：API 数据连续 10 轮无新增才认为加载完毕（每轮 800ms，共 8 秒）
+    // 不再依赖 DOM 评论数，因为虚拟化会导致 DOM 数量不稳定
+    const currentDOMCount = (await evaluate(
       targetId,
       `() => document.querySelectorAll('.parent-comment').length`,
       profile,
     )) as number;
 
-    if (currentCount !== lastCommentCount) {
-      lastCommentCount = currentCount;
-      stagnantChecks = 0;
+    if (currentDOMCount === 0 && lastAPICount === 0) {
+      emptyAreaChecks++;
+      // 评论区完全空且 API 无数据，说明评论区未加载或已关闭
+      if (emptyAreaChecks >= 3) break;
     } else {
-      stagnantChecks++;
-      // 评论数为 0 且 API 也没有数据，说明评论区根本未加载（可能已关闭）
-      if (currentCount === 0 && lastAPICount === 0 && stagnantChecks >= 2) break;
-      if (stagnantChecks >= 3) break;
+      emptyAreaChecks = 0;
     }
+
+    if (stagnantAPIChecks >= 10) break;
 
     // 5. 滚动到最后一个评论触发懒加载
     await evaluate(
@@ -802,7 +808,7 @@ async function scrollToComment(
       }`,
       profile,
     );
-    await sleep(500);
+    await sleep(800);
   }
 
   return false;

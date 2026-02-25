@@ -57,10 +57,10 @@ const BOTTOM_NAV = {
 
 /**
  * 私信输入框坐标（聊天页面底部，窗口相对坐标）。
- * 实测：窗口内 y=930，绝对坐标 y=963。
- * 点击后用 peekaboo type 输入文字，peekaboo press return 发送。
+ * 实测：普通对话和陌生人消息对话页均在 y=935（绝对坐标 y=968）。
+ * 点击后用 peekaboo type 输入文字，osascript keystroke return 发送。
  */
-const INPUT_BOX = { x: 756, y: 930 };
+const INPUT_BOX = { x: 756, y: 935 };
 
 /**
  * 返回按钮（左上角 < 箭头，窗口相对坐标）。
