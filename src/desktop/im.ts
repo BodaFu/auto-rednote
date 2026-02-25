@@ -12,8 +12,8 @@
  * 技术说明：
  * - 小红书 macOS App 是 iOS 移植版（非 Electron），CDP 不可用
  * - AX 树质量低（大多数元素标签为"按钮"/"文本"），读取消息内容依赖视觉截图
- * - 底部导航栏 Y 坐标基于 1512×949 窗口，可通过配置调整
- * - Agent 需要视觉分析（vision）能力来解析截图内容
+ * - 所有坐标均为实测硬编码值，基于 1512×949 全屏窗口
+ * - Agent 只需提供回复文本，坐标导航逻辑全部封装在代码中
  */
 
 import type { PeekabooConfig, PeekabooElement, ScreenshotResult } from "./peekaboo.js";
@@ -32,20 +32,18 @@ import {
   typeText,
 } from "./peekaboo.js";
 
+const TAG = "[desktop-im]";
+function log(...args: unknown[]): void {
+  console.error(TAG, ...args);
+}
+
 // ============================================================================
-// 布局常量（1512×949 全屏窗口，窗口相对坐标）
+// 布局常量（1512×949 全屏窗口，窗口相对坐标，全部实测）
 // ============================================================================
 
 /**
  * 底部导航栏五个 Tab 的中心坐标（窗口相对坐标）。
- *
- * 计算方式：窗口宽 1512 / 5 = 302.4px 每 Tab。
- * Y = 930（底部导航栏中心，距窗口顶部 930px，距窗口底部约 19px）。
- *
- * 这是窗口相对坐标（x=0,y=0 为窗口内容左上角），
- * clickCoords() 会自动加上屏幕偏移量（默认 y+=33，即绝对 y=963）。
- *
- * ⚠️ 仅适用于全屏模式（1512×949）。非全屏时坐标会漂移，必须保持全屏。
+ * ⚠️ 仅适用于全屏模式（1512×949）。
  */
 const BOTTOM_NAV = {
   home: { x: 151, y: 930 },
@@ -57,16 +55,53 @@ const BOTTOM_NAV = {
 
 /**
  * 私信输入框坐标（聊天页面底部，窗口相对坐标）。
- * 实测：普通对话和陌生人消息对话页均在 y=935（绝对坐标 y=968）。
- * 点击后用 peekaboo type 输入文字，osascript keystroke return 发送。
+ * 实测：窗口内 y=930，绝对坐标 y=963。
+ * 点击后用 peekaboo type 输入文字，peekaboo press return 发送。
  */
-const INPUT_BOX = { x: 756, y: 935 };
+const INPUT_BOX = { x: 756, y: 930 };
 
 /**
- * 返回按钮（左上角 < 箭头，窗口相对坐标）。
- * 实测：窗口内 x=20, y=30，绝对坐标 y=63。
+ * 消息列表布局常量（消息 Tab 页面）。
+ *
+ * 消息列表页面结构（全屏 1512×949）：
+ *   y=0~95:    顶部图标区（赞和收藏 / 新增关注 / 评论和@）
+ *   y≈100~900: 消息列表区域（所有对话 + 陌生人消息入口，按时间排序）
+ *   y≈910~949: 底部导航栏
+ *
+ * ⚠️ 「陌生人消息」不在固定位置！它按时间排序混在普通对话中间。
+ * 必须通过视觉分析截图识别「陌生人消息」在哪一行。
+ *
+ * 陌生人消息列表页面结构（点击进入后的子页面）：
+ *   每行高度约 56 逻辑像素
+ *   「回复」按钮在每行左下角，x≈88
  */
-const BACK_BUTTON = { x: 20, y: 30 };
+const MSG_LIST = {
+  /** 消息列表第一行中心 Y（图标区下方第一条） */
+  firstRowCenterY: 130,
+  /** 消息列表行高（逻辑像素，实测约 67px） */
+  rowHeight: 67,
+  /** 消息列表行中心 X */
+  rowCenterX: 512,
+  /** 最大可见消息行数（不滚动，包含陌生人消息入口） */
+  maxVisibleRows: 11,
+} as const;
+
+const STRANGER_LIST = {
+  /** 陌生人消息列表「回复」按钮第一条的 Y 坐标（实测） */
+  replyBtnYFirst: 81,
+  /** 陌生人消息列表行高（逻辑像素，实测） */
+  rowHeight: 56,
+  /** 「回复」按钮 X 坐标（固定在左侧） */
+  replyBtnX: 88,
+  /** 最大可见陌生人消息行数（不滚动） */
+  maxVisibleRows: 8,
+} as const;
+
+/**
+ * 返回按钮坐标（左上角 < 箭头，窗口相对坐标）。
+ * 实测：全屏模式下左上角导航返回按钮。
+ */
+const BACK_BUTTON = { x: 20, y: 30 } as const;
 
 // ============================================================================
 // 结果类型
@@ -86,6 +121,47 @@ export interface ImUnreadResult {
   badgeCount: number;
 }
 
+/** 消息列表中单行的描述（硬编码坐标） */
+export interface ImRowEntry {
+  /** 点击坐标（窗口相对逻辑像素） */
+  clickX: number;
+  clickY: number;
+  /** 在列表中的序号（从 1 开始） */
+  row: number;
+}
+
+/** scanInbox 的返回结果 */
+export interface ImInboxScanResult {
+  /** 消息列表截图（Agent 用于视觉确认） */
+  screenshot: ScreenshotResult;
+  /**
+   * 消息列表中所有可见行的预计算坐标（硬编码）。
+   * 包含普通对话行和「陌生人消息」入口（它们按时间排序混在一起）。
+   * Agent 需视觉分析截图，识别每行内容，然后用对应行的 clickX/clickY。
+   */
+  visibleRows: ImRowEntry[];
+  /** AX 树检测到的未读角标（辅助，不一定完整） */
+  unreadBadges: Array<{ elemId: string; label: string }>;
+  /** AX 树是否检测到未读（辅助判断，仍需视觉确认） */
+  hasUnread: boolean;
+}
+
+/** scanStrangerList 的返回结果 */
+export interface ImStrangerListResult {
+  /** 陌生人消息列表截图（Agent 用于视觉确认是否有消息） */
+  screenshot: ScreenshotResult;
+  /**
+   * 陌生人消息列表中可见行的「回复」按钮坐标（硬编码）。
+   * Agent 需视觉分析截图，判断列表是否为空，
+   * 如果有消息，依次用这些坐标调用 openConversation 打开对话。
+   */
+  replyButtons: ImRowEntry[];
+  /** AX 树是否检测到「回复」按钮（辅助判断列表是否为空） */
+  hasReplyButtons: boolean;
+  /** AX 树检测到的元素总数 */
+  axElementCount: number;
+}
+
 export interface ImOpenResult {
   /** 打开对话后的截图（包含消息历史）*/
   screenshot: ScreenshotResult;
@@ -93,8 +169,10 @@ export interface ImOpenResult {
 }
 
 export interface ImSendResult {
-  /** 发送后的截图（用于验证消息已出现在对话中）*/
-  screenshot: ScreenshotResult;
+  /** 已发送的文本 */
+  sentText: string;
+  /** 字符数 */
+  charCount: number;
 }
 
 export interface ImSeeResult {
@@ -122,14 +200,15 @@ function isUnreadBadge(e: PeekabooElement): boolean {
  * 避免中途切回导致后续操作点错 App。
  */
 async function withRestore<T>(cfg: PeekabooConfig, fn: () => Promise<T>): Promise<T> {
-  // 操作前记录当前前台 App
   const previousApp = cfg.restoreApp ? getFrontmostApp() : null;
+  log(`withRestore: restoreApp=${cfg.restoreApp} previousApp="${previousApp ?? "none"}"`);
   try {
     return await fn();
   } finally {
-    // 操作完成后切回（跳过小红书自身，避免切回到 discover/rednote）
     if (previousApp && previousApp !== cfg.processName && previousApp !== "rednote") {
       restoreFrontmostApp(previousApp);
+    } else {
+      log("withRestore: skip restore (restoreApp off or same app)");
     }
   }
 }
@@ -139,7 +218,117 @@ async function withRestore<T>(cfg: PeekabooConfig, fn: () => Promise<T>): Promis
 // ============================================================================
 
 /**
- * 扫描未读私信（心跳专用）。
+ * 扫描消息列表，返回所有可见行的硬编码坐标。
+ *
+ * ⚠️ 「陌生人消息」入口不在固定位置，按时间排序混在普通对话中间。
+ *
+ * Agent 使用方式：
+ * 1. 调用此函数，获取截图 + visibleRows
+ * 2. 视觉分析截图，识别每行内容：有未读的普通对话、「陌生人消息」入口
+ * 3. 用对应行的 visibleRows[N].clickX/Y 调用 openConversation
+ */
+export async function scanInbox(cfg: PeekabooConfig): Promise<ImInboxScanResult> {
+  const t0 = Date.now();
+  log("scanInbox: START");
+  const result = await withRestore(cfg, async () => {
+    log("scanInbox: activateApp");
+    activateApp(cfg);
+    await sleep(SPACE_SWITCH_WAIT_MS);
+
+    log(`scanInbox: click messages tab (${BOTTOM_NAV.messages.x},${BOTTOM_NAV.messages.y})`);
+    clickCoords(BOTTOM_NAV.messages.x, BOTTOM_NAV.messages.y, cfg);
+    await sleep(500);
+
+    log("scanInbox: screenshot");
+    const scr = screenshot(cfg);
+
+    // AX 树辅助检测未读角标（可能超时，不阻塞主流程）
+    let unreadBadges: Array<{ elemId: string; label: string }> = [];
+    try {
+      const { elements } = seeElements(cfg);
+      unreadBadges = elements
+        .filter(isUnreadBadge)
+        .map((e) => ({ elemId: e.id, label: e.label ?? "" }));
+      log(`scanInbox: AX tree found ${unreadBadges.length} unread badges`);
+    } catch (err) {
+      log(`scanInbox: AX tree failed (${err})`);
+    }
+
+    // 统一生成所有可见行的坐标（包含普通对话和陌生人消息入口）
+    const visibleRows: ImRowEntry[] = Array.from(
+      { length: MSG_LIST.maxVisibleRows },
+      (_, i) => ({
+        clickX: MSG_LIST.rowCenterX,
+        clickY: MSG_LIST.firstRowCenterY + i * MSG_LIST.rowHeight,
+        row: i + 1,
+      }),
+    );
+
+    return {
+      screenshot: scr,
+      visibleRows,
+      unreadBadges,
+      hasUnread: unreadBadges.length > 0,
+    };
+  });
+  log(`scanInbox: DONE (${Date.now() - t0}ms) rows=${result.visibleRows.length} hasUnread=${result.hasUnread}`);
+  return result;
+}
+
+/**
+ * 扫描陌生人消息列表，返回硬编码的「回复」按钮坐标列表。
+ *
+ * 前置条件：当前界面必须已通过「陌生人消息」行坐标进入陌生人消息列表页。
+ *
+ * Agent 使用方式：
+ * 1. 调用此函数，获取截图 + replyButtons
+ * 2. 视觉分析截图，判断列表是否为空
+ * 3. 如果有消息，依次用 replyButtons[i].clickX/Y 调用 openConversation
+ *
+ * 注意：replyButtons 包含所有可见行的坐标。
+ * 是否有消息需要视觉分析截图判断（列表为空时截图会显示空状态）。
+ */
+export async function scanStrangerList(cfg: PeekabooConfig): Promise<ImStrangerListResult> {
+  const t0 = Date.now();
+  log("scanStrangerList: START");
+  const result = await withRestore(cfg, async () => {
+    activateApp(cfg);
+    await sleep(SPACE_SWITCH_WAIT_MS);
+
+    log("scanStrangerList: screenshot");
+    const scr = screenshot(cfg);
+
+    // AX 树辅助检测是否有「回复」按钮（判断列表是否为空）
+    let hasReplyButtons = false;
+    let axElementCount = 0;
+    try {
+      const { elements } = seeElements(cfg);
+      axElementCount = elements.length;
+      hasReplyButtons = elements.some(
+        (e) => e.label?.includes("回复") || e.description?.includes("回复"),
+      );
+      log(`scanStrangerList: AX tree ${axElementCount} elements, hasReplyButtons=${hasReplyButtons}`);
+    } catch (err) {
+      log(`scanStrangerList: AX tree failed (${err})`);
+    }
+
+    const replyButtons: ImRowEntry[] = Array.from(
+      { length: STRANGER_LIST.maxVisibleRows },
+      (_, i) => ({
+        clickX: STRANGER_LIST.replyBtnX,
+        clickY: STRANGER_LIST.replyBtnYFirst + i * STRANGER_LIST.rowHeight,
+        row: i + 1,
+      }),
+    );
+
+    return { screenshot: scr, replyButtons, hasReplyButtons, axElementCount };
+  });
+  log(`scanStrangerList: DONE (${Date.now() - t0}ms) hasReplyButtons=${result.hasReplyButtons}`);
+  return result;
+}
+
+/**
+ * 扫描未读私信（心跳专用，旧版接口保留兼容）。
  *
  * 流程：
  * 1. 激活 App
@@ -147,19 +336,16 @@ async function withRestore<T>(cfg: PeekabooConfig, fn: () => Promise<T>): Promis
  * 3. 扫描 AX 树，提取未读角标信息
  * 4. 截图返回（Agent 需视觉分析具体哪条对话有未读）
  *
- * Agent 使用方式（心跳循环）：
- * 1. 调用此工具，获取截图 + unreadBadges
- * 2. 视觉分析截图，识别有未读消息的对话行及其坐标
- * 3. 调用 openConversation 打开对话
- * 4. 阅读截图中的消息内容
- * 5. 调用 sendMessage 回复
+ * 推荐使用 scanInbox() 替代此函数，它返回更完整的硬编码坐标信息。
  */
 export async function scanUnread(cfg: PeekabooConfig): Promise<ImUnreadResult> {
-  return withRestore(cfg, async () => {
+  const t0 = Date.now();
+  log("scanUnread: START");
+  const result = await withRestore(cfg, async () => {
     activateApp(cfg);
     await sleep(SPACE_SWITCH_WAIT_MS);
 
-    // 点击「消息」Tab，等待 Tab 内容渲染
+    log(`scanUnread: click messages tab (${BOTTOM_NAV.messages.x},${BOTTOM_NAV.messages.y})`);
     clickCoords(BOTTOM_NAV.messages.x, BOTTOM_NAV.messages.y, cfg);
     await sleep(500);
 
@@ -171,8 +357,9 @@ export async function scanUnread(cfg: PeekabooConfig): Promise<ImUnreadResult> {
       unreadBadges = elements
         .filter(isUnreadBadge)
         .map((e) => ({ elemId: e.id, label: e.label ?? "", description: e.description ?? "" }));
-    } catch {
-      // peekaboo see 不可用（iOS App 兼容性问题），降级为纯视觉模式
+      log(`scanUnread: AX tree found ${unreadBadges.length} unread badges`);
+    } catch (err) {
+      log(`scanUnread: AX tree failed (${err}), falling back to visual-only`);
     }
 
     return {
@@ -182,6 +369,8 @@ export async function scanUnread(cfg: PeekabooConfig): Promise<ImUnreadResult> {
       badgeCount: unreadBadges.length,
     };
   });
+  log(`scanUnread: DONE hasUnread=${result.hasUnread} badges=${result.badgeCount} (${Date.now() - t0}ms)`);
+  return result;
 }
 
 /**
@@ -218,26 +407,34 @@ export async function openConversation(
     throw new Error("必须提供 elemId 或 (x, y) 坐标之一");
   }
 
-  return withRestore(cfg, async () => {
+  const t0 = Date.now();
+  log(`openConversation: START target=${JSON.stringify(target)} waitMs=${waitMs}`);
+  const result = await withRestore(cfg, async () => {
     activateApp(cfg);
     await sleep(SPACE_SWITCH_WAIT_MS);
 
     let clickedAt: { x: number; y: number } | undefined;
 
     if (target.elemId) {
+      log(`openConversation: clickElement elemId="${target.elemId}"`);
       const result = clickElement(target.elemId, cfg);
       if (result.clickLocation) clickedAt = result.clickLocation;
     } else {
       const x = target.x!;
       const y = target.y!;
+      log(`openConversation: clickCoords (${x},${y})`);
       clickCoords(x, y, cfg);
       clickedAt = { x, y };
     }
 
+    log(`openConversation: waiting ${waitMs}ms for page load`);
     await sleep(waitMs);
 
+    log("openConversation: screenshot");
     return { screenshot: screenshot(cfg), clickedAt };
   });
+  log(`openConversation: DONE clickedAt=(${result.clickedAt?.x},${result.clickedAt?.y}) (${Date.now() - t0}ms)`);
+  return result;
 }
 
 /**
@@ -255,40 +452,49 @@ export async function openConversation(
 export async function sendMessage(text: string, cfg: PeekabooConfig): Promise<ImSendResult> {
   if (!text.trim()) throw new Error("消息内容不能为空");
 
-  return withRestore(cfg, async () => {
+  const t0 = Date.now();
+  log(`sendMessage: START text="${text.slice(0, 50)}${text.length > 50 ? "..." : ""}" (${text.length} chars)`);
+  await withRestore(cfg, async () => {
     activateApp(cfg);
     await sleep(SPACE_SWITCH_WAIT_MS);
 
-    // 点击输入框获取焦点
+    log(`sendMessage: click input box (${INPUT_BOX.x},${INPUT_BOX.y})`);
     clickCoords(INPUT_BOX.x, INPUT_BOX.y, cfg);
     await sleep(200);
 
-    // 输入文字
+    log("sendMessage: typeText");
     typeText(text, cfg);
     await sleep(150);
 
-    // 发送
+    log("sendMessage: press return");
     pressKey("return", cfg);
-    await sleep(500);
-
-    return { screenshot: screenshot(cfg) };
+    await sleep(300);
   });
+  log(`sendMessage: DONE (${Date.now() - t0}ms)`);
+  return { sentText: text, charCount: text.length };
 }
 
 /**
  * 导航返回上一页（点击左上角 < 按钮）。
  * 用于从对话页返回消息列表，或从消息列表返回首页。
  */
-export async function navigateBack(cfg: PeekabooConfig): Promise<ScreenshotResult> {
-  return withRestore(cfg, async () => {
+export interface ImBackResult {
+  /** 点击的返回按钮坐标 */
+  clickedAt: { x: number; y: number };
+}
+
+export async function navigateBack(cfg: PeekabooConfig): Promise<ImBackResult> {
+  const t0 = Date.now();
+  log(`navigateBack: START click=(${BACK_BUTTON.x},${BACK_BUTTON.y})`);
+  await withRestore(cfg, async () => {
     activateApp(cfg);
     await sleep(SPACE_SWITCH_WAIT_MS);
 
     clickCoords(BACK_BUTTON.x, BACK_BUTTON.y, cfg);
-    await sleep(400);
-
-    return screenshot(cfg);
+    await sleep(300);
   });
+  log(`navigateBack: DONE (${Date.now() - t0}ms)`);
+  return { clickedAt: { x: BACK_BUTTON.x, y: BACK_BUTTON.y } };
 }
 
 /**
@@ -296,11 +502,15 @@ export async function navigateBack(cfg: PeekabooConfig): Promise<ScreenshotResul
  * 会切换到小红书 Space 截图，根据 cfg.restoreApp 决定是否切回。
  */
 export async function takeScreenshot(cfg: PeekabooConfig): Promise<ScreenshotResult> {
-  return withRestore(cfg, async () => {
+  log("takeScreenshot: START");
+  const t0 = Date.now();
+  const result = await withRestore(cfg, async () => {
     activateApp(cfg);
     await sleep(SPACE_SWITCH_WAIT_MS);
     return screenshot(cfg);
   });
+  log(`takeScreenshot: DONE (${Date.now() - t0}ms)`);
+  return result;
 }
 
 /**

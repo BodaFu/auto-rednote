@@ -32,13 +32,15 @@
  * 发布工具：
  * - xhs_publish               发布笔记（图文 / 视频）
  * 桌面 IM 工具（私信 / 群聊，需要 peekaboo + 小红书桌面 App）：
- * - xhs_desktop_im_unread     扫描未读私信（心跳专用，返回截图供视觉分析）
- * - xhs_desktop_im_inbox      查看消息收件箱（返回截图）
- * - xhs_desktop_im_open       打开指定私信对话
- * - xhs_desktop_im_send       在当前对话中发送私信
- * - xhs_desktop_im_back       返回上一页
- * - xhs_desktop_im_see        获取当前 UI 元素列表（调试 / 动态定位）
- * - xhs_desktop_screenshot    截图当前小红书桌面 App 界面
+ * - xhs_desktop_im_scan_inbox    【推荐】扫描消息列表 + 返回预计算点击坐标
+ * - xhs_desktop_im_scan_stranger 【推荐】扫描陌生人消息列表 + 返回「回复」按钮坐标
+ * - xhs_desktop_im_unread        扫描未读私信（兼容旧版）
+ * - xhs_desktop_im_inbox         查看消息收件箱（简单截图）
+ * - xhs_desktop_im_open          打开指定私信对话（坐标来自 scan 工具）
+ * - xhs_desktop_im_send          在当前对话中发送私信
+ * - xhs_desktop_im_back          返回上一页
+ * - xhs_desktop_im_see           获取当前 UI 元素列表（调试 / 动态定位）
+ * - xhs_desktop_screenshot       截图当前小红书桌面 App 界面
  */
 
 import { Type } from "@sinclair/typebox";
@@ -63,6 +65,8 @@ import {
 import { publishNote } from "./src/actions/publish.js";
 import { initState } from "./src/state.js";
 import {
+  scanInbox,
+  scanStrangerList,
   scanUnread,
   getInbox,
   openConversation,
@@ -694,19 +698,121 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerTool(
     {
+      name: "xhs_desktop_im_scan_inbox",
+      description: `【推荐】扫描小红书消息列表，返回截图 + 所有可见行的预计算点击坐标。
+
+自动导航到「消息」Tab → 截图 → 返回：
+- screenshot（图片，1512×949 像素）：消息列表界面
+- visibleRows：11 行可见消息的坐标（硬编码），每行包含 clickX/clickY 和 row 编号
+
+**重要：「陌生人消息」入口不在固定位置，它按时间排序混在普通对话中间。**
+你必须视觉分析截图，找到「陌生人消息」所在行，使用该行的 clickX/clickY。
+
+**使用流程**：
+1. 调用此工具 → 获得截图 + 所有行坐标
+2. 视觉分析截图，识别每行内容：
+   - 带未读标记（右侧红点/数字）的对话行 → 打开回复
+   - 标注「陌生人消息」的行 → 打开进入陌生人列表
+3. 用 visibleRows[N].clickX/clickY 调用 xhs_desktop_im_open
+4. 进入陌生人列表后 → 调用 xhs_desktop_im_scan_stranger
+
+**坐标必须来自 visibleRows 返回值**，不要从截图中自行估算坐标。`,
+      parameters: Type.Object({}),
+      async execute(_id: string, _params: Record<string, unknown>) {
+        const result = await scanInbox(peekabooConfig);
+        const lines = result.visibleRows
+          .map((r) => `  第${r.row}行: clickX=${r.clickX}, clickY=${r.clickY}`)
+          .join("\n");
+        const unreadInfo = result.hasUnread
+          ? `AX 树检测到 ${result.unreadBadges.length} 个未读角标: ${result.unreadBadges.map((b) => b.label).join(", ")}`
+          : "AX 树未检测到未读角标（仍需视觉确认截图）";
+        const summary = [
+          `消息列表截图已返回（1512×949 像素，截图坐标=点击坐标）`,
+          unreadInfo,
+          `可见行坐标（${result.visibleRows.length} 行，包含普通对话和「陌生人消息」入口）：`,
+          lines,
+          `⚠️ 请视觉分析截图，找到「陌生人消息」在第几行，并找出有未读标记的行。`,
+        ].join("\n");
+        return {
+          content: [
+            { type: "text" as const, text: summary },
+            {
+              type: "image" as const,
+              data: result.screenshot.base64,
+              mimeType: "image/png" as const,
+            },
+          ],
+          details: {
+            visibleRows: result.visibleRows,
+            hasUnread: result.hasUnread,
+            unreadBadges: result.unreadBadges,
+            screenshotPath: result.screenshot.path,
+          },
+        };
+      },
+    },
+    { optional: true },
+  );
+
+  api.registerTool(
+    {
+      name: "xhs_desktop_im_scan_stranger",
+      description: `扫描陌生人消息列表，返回截图 + 预计算好的「回复」按钮坐标 + 列表是否为空的检测。
+
+**前置条件**：必须已通过 xhs_desktop_im_open 点击「陌生人消息」行的坐标进入陌生人消息列表页。
+
+返回：
+- screenshot（图片，1512×949 像素）：陌生人消息列表
+- replyButtons：最多 8 个「回复」按钮的坐标
+- hasReplyButtons：AX 树检测列表是否有「回复」按钮（辅助判断是否为空）
+
+**使用流程**：
+1. 先看 hasReplyButtons 辅助判断，再视觉分析截图确认
+2. 如果有消息，用 replyButtons[N].clickX/clickY 调用 xhs_desktop_im_open 打开对话
+
+**坐标必须来自返回值**，不要从截图中自行估算。`,
+      parameters: Type.Object({}),
+      async execute(_id: string, _params: Record<string, unknown>) {
+        const result = await scanStrangerList(peekabooConfig);
+        const lines = result.replyButtons
+          .map((b) => `  第${b.row}条: clickX=${b.clickX}, clickY=${b.clickY}`)
+          .join("\n");
+        const listStatus = result.hasReplyButtons
+          ? "AX 树检测到「回复」按钮，列表可能有消息"
+          : `AX 树未检测到「回复」按钮（${result.axElementCount} 个元素），列表可能为空（仍需视觉确认）`;
+        const summary = [
+          `陌生人消息列表截图已返回（1512×949 像素）`,
+          listStatus,
+          `「回复」按钮坐标（${result.replyButtons.length} 条）：`,
+          lines,
+        ].join("\n");
+        return {
+          content: [
+            { type: "text" as const, text: summary },
+            {
+              type: "image" as const,
+              data: result.screenshot.base64,
+              mimeType: "image/png" as const,
+            },
+          ],
+          details: {
+            replyButtons: result.replyButtons,
+            hasReplyButtons: result.hasReplyButtons,
+            screenshotPath: result.screenshot.path,
+          },
+        };
+      },
+    },
+    { optional: true },
+  );
+
+  api.registerTool(
+    {
       name: "xhs_desktop_im_unread",
-      description: `扫描小红书桌面 App 中的未读私信（心跳专用）。
+      description: `扫描未读私信（兼容旧版，推荐使用 xhs_desktop_im_scan_inbox 替代）。
 
-导航到「消息」页并截图，返回：
-- screenshot（图片）：消息列表界面，Agent 需视觉分析识别哪些对话有未读消息
-- unreadBadges：AX 树检测到的未读角标（如底部 Tab 上的"2条未读"）
-
-心跳使用流程：
-1. 调用此工具 → 获得消息列表截图
-2. 视觉分析截图，找到有未读的对话及其大致坐标（y 值）
-3. 调用 xhs_desktop_im_open { x, y } 打开对话
-4. 视觉读取消息内容（截图返回）
-5. 调用 xhs_desktop_im_send 发送回复`,
+导航到「消息」页，通过 AX 树检测未读角标并截图。
+返回 unreadBadges + 截图，但不包含预计算坐标。`,
       parameters: Type.Object({}),
       async execute(_id: string, _params: Record<string, unknown>) {
         const result = await scanUnread(peekabooConfig);
@@ -737,16 +843,15 @@ export default function register(api: OpenClawPluginApi) {
   api.registerTool(
     {
       name: "xhs_desktop_im_inbox",
-      description: `查看小红书桌面 App 消息收件箱（返回截图）。
+      description: `查看消息收件箱（简单截图，不返回坐标）。
 
-导航到「消息」Tab，截图返回全量消息列表。
-与 xhs_desktop_im_unread 不同，此工具不过滤未读状态，适合随时查看当前收件箱。`,
+导航到「消息」Tab 并截图。推荐使用 xhs_desktop_im_scan_inbox 替代（含坐标）。`,
       parameters: Type.Object({}),
       async execute(_id: string, _params: Record<string, unknown>) {
         const scr = await getInbox(peekabooConfig);
         return {
           content: [
-            { type: "text" as const, text: "消息收件箱截图已返回" },
+            { type: "text" as const, text: "消息收件箱截图已返回（1512×949 像素）" },
             {
               type: "image" as const,
               data: scr.base64,
@@ -766,8 +871,11 @@ export default function register(api: OpenClawPluginApi) {
       description: `打开小红书桌面 App 中的指定私信对话。
 
 支持两种定位方式（二选一）：
-- elemId：从 xhs_desktop_im_see 或 xhs_desktop_im_unread 的 unreadBadges 获取的元素 ID（最稳定）
-- x + y：从消息列表截图中视觉识别的坐标（窗口相对像素坐标，截图像素 = 点击坐标）
+- elemId：从 xhs_desktop_im_see 的元素 ID（最稳定）
+- x + y：从 xhs_desktop_im_scan_inbox 或 xhs_desktop_im_scan_stranger 返回的 clickX/clickY
+
+**重要：坐标必须来自 scan 工具返回的 clickX/clickY，不要从截图中自行估算坐标。**
+截图尺寸为 1512×949 逻辑像素，坐标系与点击坐标一致。
 
 打开后返回对话截图，Agent 需视觉分析读取消息内容。`,
       parameters: Type.Object({
@@ -830,9 +938,8 @@ export default function register(api: OpenClawPluginApi) {
       description: `在小红书桌面 App 当前打开的私信对话中发送一条消息。
 
 前置条件：必须已通过 xhs_desktop_im_open 打开了某个对话（底部输入框可见）。
-发送后返回截图，Agent 可视觉确认消息是否出现在对话中。
-
-发送流程：点击输入框 → 输入文字 → 按 Return 发送。`,
+发送流程：点击输入框 → 输入文字 → 按 Return 发送。
+返回文字确认（不返回截图，节省 token），如需确认可调用 xhs_desktop_screenshot。`,
       parameters: Type.Object({
         text: Type.String({ description: "要发送的消息内容（支持中文）" }),
       }),
@@ -845,17 +952,12 @@ export default function register(api: OpenClawPluginApi) {
           content: [
             {
               type: "text" as const,
-              text: `消息已发送：「${text.slice(0, 50)}${text.length > 50 ? "…" : ""}」`,
-            },
-            {
-              type: "image" as const,
-              data: result.screenshot.base64,
-              mimeType: "image/png" as const,
+              text: `消息已发送：「${result.sentText.slice(0, 50)}${result.sentText.length > 50 ? "…" : ""}」（${result.charCount} 字）`,
             },
           ],
           details: {
-            sentText: text,
-            screenshotPath: result.screenshot.path,
+            sentText: result.sentText,
+            charCount: result.charCount,
           },
         };
       },
@@ -867,20 +969,16 @@ export default function register(api: OpenClawPluginApi) {
     {
       name: "xhs_desktop_im_back",
       description: `在小红书桌面 App 中点击返回按钮（左上角 <）导航到上一页。
-用于从对话页返回消息列表，或从消息列表返回到首页。`,
+用于从对话页返回消息列表，或从消息列表返回到首页。
+返回文字确认（不返回截图，节省 token）。`,
       parameters: Type.Object({}),
       async execute(_id: string, _params: Record<string, unknown>) {
-        const scr = await navigateBack(peekabooConfig);
+        const result = await navigateBack(peekabooConfig);
         return {
           content: [
-            { type: "text" as const, text: "已返回上一页，截图已返回" },
-            {
-              type: "image" as const,
-              data: scr.base64,
-              mimeType: "image/png" as const,
-            },
+            { type: "text" as const, text: `已点击返回按钮 (${result.clickedAt.x},${result.clickedAt.y})，已导航到上一页` },
           ],
-          details: { screenshotPath: scr.path },
+          details: result,
         };
       },
     },
@@ -953,8 +1051,9 @@ export default function register(api: OpenClawPluginApi) {
   api.registerTool(
     {
       name: "xhs_desktop_screenshot",
-      description: `截图小红书桌面 App 当前界面。
-适用于：确认当前页面状态、调试交互结果、在不需要完整 IM 流程时快速查看界面。`,
+      description: `截图小红书桌面 App 当前界面（1512×949 像素）。
+适用于：确认当前页面状态、调试交互结果、在不需要完整 IM 流程时快速查看界面。
+截图已缩放到逻辑像素尺寸，像素坐标与点击坐标一致。`,
       parameters: Type.Object({}),
       async execute(_id: string, _params: Record<string, unknown>) {
         const scr = await takeScreenshot(peekabooConfig);

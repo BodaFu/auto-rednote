@@ -23,6 +23,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+const TAG = "[desktop-im]";
+function log(...args: unknown[]): void {
+  console.error(TAG, ...args);
+}
+
 // ============================================================================
 // 配置
 // ============================================================================
@@ -60,7 +65,7 @@ export const DEFAULT_PEEKABOO_CONFIG: PeekabooConfig = {
   windowTitle: "小红书",
   processName: "discover",
   windowRegion: { x: 0, y: 33, width: 1512, height: 949 },
-  restoreApp: true,
+  restoreApp: false,
 };
 
 /**
@@ -173,16 +178,21 @@ function runPeekaboo(
  * 如果无法获取，返回 null（此时 restoreApp 的切回操作将跳过）。
  */
 export function getFrontmostApp(): string | null {
+  const t0 = Date.now();
   const result = spawnSync(
     "/usr/bin/osascript",
     ["-e", "path to frontmost application as text"],
     { encoding: "utf-8", timeout: 2_000 },
   );
-  if (result.status !== 0 || !result.stdout?.trim()) return null;
-  // 路径格式: "Macintosh HD:Applications:Cursor.app:" → "Cursor"
+  if (result.status !== 0 || !result.stdout?.trim()) {
+    log("getFrontmostApp: failed", result.status, result.stderr?.trim());
+    return null;
+  }
   const raw = result.stdout.trim();
   const match = raw.match(/:([^:]+)\.app:?$/);
-  return match ? match[1] : raw;
+  const name = match ? match[1] : raw;
+  log(`getFrontmostApp: "${name}" (${Date.now() - t0}ms)`);
+  return name;
 }
 
 /**
@@ -190,6 +200,7 @@ export function getFrontmostApp(): string | null {
  * 用 `tell application X to activate`（非全屏 App 不需要 System Events）。
  */
 export function restoreFrontmostApp(appName: string): void {
+  log(`restoreFrontmostApp: switching back to "${appName}"`);
   spawnSync(
     "/usr/bin/osascript",
     ["-e", `tell application "${appName}" to activate`],
@@ -207,13 +218,18 @@ export function restoreFrontmostApp(appName: string): void {
  * 注意：切换 Space 需要约 600ms 动画时间，调用后需等待。
  */
 export function activateApp(cfg: PeekabooConfig): void {
-  spawnSync(
+  const t0 = Date.now();
+  const result = spawnSync(
     "/usr/bin/osascript",
     [
       "-e",
       `tell application "System Events" to tell application process "${cfg.processName}" to set frontmost to true`,
     ],
     { encoding: "utf-8", timeout: 5_000 },
+  );
+  log(
+    `activateApp: process="${cfg.processName}" status=${result.status} (${Date.now() - t0}ms)`,
+    result.stderr?.trim() ? `stderr=${result.stderr.trim()}` : "",
   );
 }
 
@@ -235,28 +251,45 @@ export function sleep(ms: number): Promise<void> {
  * 坐标系：截图像素坐标与 clickCoords 坐标一致（x=0,y=0 为窗口内容左上角）。
  */
 export function screenshot(cfg: PeekabooConfig): ScreenshotResult {
+  const t0 = Date.now();
   const path = join(tmpdir(), `xhs-desktop-${Date.now()}.png`);
   const region = cfg.windowRegion ?? DEFAULT_PEEKABOO_CONFIG.windowRegion!;
+  const regionStr = `${region.x},${region.y},${region.width},${region.height}`;
 
-  // -x: 不播放快门音效；-R: 指定区域 x,y,width,height
-  const result = spawnSync(
+  const captureResult = spawnSync(
     "/usr/sbin/screencapture",
-    ["-x", "-R", `${region.x},${region.y},${region.width},${region.height}`, path],
+    ["-x", "-R", regionStr, path],
     { encoding: "utf-8", timeout: 10_000 },
   );
 
-  if (result.error) {
-    throw new Error(`screencapture 执行错误: ${result.error.message}`);
+  if (captureResult.error) {
+    log(`screenshot: ERROR ${captureResult.error.message}`);
+    throw new Error(`screencapture 执行错误: ${captureResult.error.message}`);
   }
-  if (result.status !== 0) {
-    throw new Error(`screencapture 失败（退出码 ${result.status}）: ${result.stderr ?? ""}`);
+  if (captureResult.status !== 0) {
+    log(`screenshot: FAILED exit=${captureResult.status} stderr=${captureResult.stderr}`);
+    throw new Error(`screencapture 失败（退出码 ${captureResult.status}）: ${captureResult.stderr ?? ""}`);
   }
   if (!existsSync(path)) {
+    log(`screenshot: file not created at ${path}`);
     throw new Error(`screencapture 未生成文件: ${path}`);
+  }
+
+  // Retina 屏幕截图为 2x 分辨率（3024×1898），需缩放到逻辑像素（1512×949）
+  // 使截图像素坐标与 clickCoords 坐标系一致
+  // 注意：必须用 -z（精确像素）而不是 --resampleWidth（受 DPI 影响）
+  const resizeResult = spawnSync(
+    "/usr/bin/sips",
+    ["-z", String(region.height), String(region.width), path],
+    { encoding: "utf-8", timeout: 10_000 },
+  );
+  if (resizeResult.status !== 0) {
+    log(`screenshot: sips resize failed, using original Retina image. stderr=${resizeResult.stderr}`);
   }
 
   const data = readFileSync(path);
   const base64 = data.toString("base64");
+  log(`screenshot: region=${regionStr} size=${data.length}bytes path=${path} (${Date.now() - t0}ms)`);
   return { path, base64, dataUri: `data:image/png;base64,${base64}` };
 }
 
@@ -317,16 +350,20 @@ export function seeElements(cfg: PeekabooConfig): SeeResult {
 
 /** 通过 peekaboo 元素 ID 点击（最稳定，ID 来自 seeElements 的快照）*/
 export function clickElement(elemId: string, cfg: PeekabooConfig): ClickResult {
+  log(`clickElement: elemId="${elemId}"`);
+  const t0 = Date.now();
   const output = runPeekaboo(["click", "--on", elemId, "--app", cfg.appName], cfg);
 
   const parsed = JSON.parse(output) as Record<string, unknown>;
   const data = (parsed.data ?? {}) as Record<string, unknown>;
-  return {
+  const result = {
     success: Boolean(data.success),
     clickLocation: data.clickLocation as { x: number; y: number } | undefined,
     targetApp: data.targetApp as string | undefined,
     clickedElement: data.clickedElement as string | undefined,
   };
+  log(`clickElement: result=${result.success ? "OK" : "FAIL"} clickedAt=(${result.clickLocation?.x},${result.clickLocation?.y}) (${Date.now() - t0}ms)`);
+  return result;
 }
 
 /**
@@ -340,10 +377,12 @@ export function clickElement(elemId: string, cfg: PeekabooConfig): ClickResult {
  */
 export function clickCoords(x: number, y: number, cfg: PeekabooConfig): ClickResult {
   const region = cfg.windowRegion ?? DEFAULT_PEEKABOO_CONFIG.windowRegion!;
-  // 转换为屏幕绝对坐标
   const absX = region.x + x;
   const absY = region.y + y;
 
+  log(`clickCoords: window=(${x},${y}) → screen=(${absX},${absY}) [offset: x+${region.x}, y+${region.y}]`);
+
+  const t0 = Date.now();
   const output = runPeekaboo(
     ["click", "--app", cfg.appName, "--coords", `${absX},${absY}`],
     cfg,
@@ -351,11 +390,19 @@ export function clickCoords(x: number, y: number, cfg: PeekabooConfig): ClickRes
 
   const parsed = JSON.parse(output) as Record<string, unknown>;
   const data = (parsed.data ?? {}) as Record<string, unknown>;
-  return {
-    success: Boolean(data.success),
-    clickLocation: data.clickLocation as { x: number; y: number } | undefined,
-    targetApp: data.targetApp as string | undefined,
-  };
+  const clickLoc = data.clickLocation as { x: number; y: number } | undefined;
+  const targetApp = data.targetApp as string | undefined;
+  const success = Boolean(data.success);
+
+  log(
+    `clickCoords: result=${success ? "OK" : "FAIL"}`,
+    `actualClick=(${clickLoc?.x ?? "?"},${clickLoc?.y ?? "?"})`,
+    `targetApp="${targetApp ?? "?"}"`,
+    `(${Date.now() - t0}ms)`,
+    success ? "" : `raw=${JSON.stringify(data).slice(0, 200)}`,
+  );
+
+  return { success, clickLocation: clickLoc, targetApp };
 }
 
 // ============================================================================
@@ -370,27 +417,21 @@ export function clickCoords(x: number, y: number, cfg: PeekabooConfig): ClickRes
  * text 是位置参数，必须放在子命令后、选项前。
  */
 export function typeText(text: string, cfg: PeekabooConfig): void {
+  log(`typeText: "${text.slice(0, 50)}${text.length > 50 ? "..." : ""}" (${text.length} chars)`);
+  const t0 = Date.now();
   runPeekaboo(["type", text, "--app", cfg.appName], cfg, { json: false });
+  log(`typeText: done (${Date.now() - t0}ms)`);
 }
 
 /**
  * 按下单个按键（如 "return", "delete", "escape"）。
  *
- * return 键使用 osascript keystroke 发给目标进程，
- * 因为 peekaboo press return 在 iOS App 的某些输入框（如陌生人消息）中无法触发发送。
- * 其他按键仍通过 peekaboo press。
+ * peekaboo press 语法：peekaboo press <keys> --app <app>
+ * keys 是位置参数。
  */
 export function pressKey(key: string, cfg: PeekabooConfig): void {
-  if (key === "return") {
-    // osascript keystroke return 直接发给目标进程，可靠触发 iOS App 输入框发送
-    spawnSync(
-      "/usr/bin/osascript",
-      ["-e", `tell application "System Events" to tell application process "${cfg.processName}" to keystroke return`],
-      { encoding: "utf-8", timeout: 3_000 },
-    );
-  } else {
-    runPeekaboo(["press", key, "--app", cfg.appName], cfg, { json: false });
-  }
+  log(`pressKey: "${key}"`);
+  runPeekaboo(["press", key, "--app", cfg.appName], cfg, { json: false });
 }
 
 /**
@@ -399,5 +440,6 @@ export function pressKey(key: string, cfg: PeekabooConfig): void {
  * peekaboo hotkey 语法：peekaboo hotkey --keys <keys> --app <app>
  */
 export function hotkey(keys: string, cfg: PeekabooConfig): void {
+  log(`hotkey: "${keys}"`);
   runPeekaboo(["hotkey", "--keys", keys, "--app", cfg.appName], cfg, { json: false });
 }
