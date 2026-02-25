@@ -142,12 +142,24 @@ function runPeekaboo(
 // 工具函数
 // ============================================================================
 
-/** 将 App 带到前台（iOS on Mac 需要先激活才能响应点击）*/
+/**
+ * 将 App 带到前台并切换到其所在 Space。
+ *
+ * 使用 System Events 的 `set frontmost to true`，
+ * 这是唯一能跨 Space 切换到全屏 App 的方式。
+ * `tell application X to activate` 只激活进程，不切换 Space。
+ *
+ * 注意：切换 Space 需要约 600ms 动画时间，调用后需等待。
+ */
 export function activateApp(cfg: PeekabooConfig): void {
-  spawnSync("/usr/bin/osascript", ["-e", `tell application "${cfg.processName}" to activate`], {
-    encoding: "utf-8",
-    timeout: 5_000,
-  });
+  spawnSync(
+    "/usr/bin/osascript",
+    [
+      "-e",
+      `tell application "System Events" to tell application process "${cfg.processName}" to set frontmost to true`,
+    ],
+    { encoding: "utf-8", timeout: 5_000 },
+  );
 }
 
 export function sleep(ms: number): Promise<void> {
@@ -161,13 +173,23 @@ export function sleep(ms: number): Promise<void> {
 /**
  * 截图小红书主窗口，返回文件路径 + base64。
  *
- * 使用 macOS 原生 screencapture 替代 peekaboo image，原因：
- * peekaboo 3.0.0-beta3 在使用 --window-title 参数时会卡死（SWIFT TASK CONTINUATION MISUSE）。
+ * 小红书是全屏 App，运行在独立 Space。截图前必须先切换到该 Space，
+ * 否则 screencapture 截到的是当前 Space（其他 App）。
+ *
+ * 流程：
+ * 1. 调用 activateApp 切换到小红书 Space（System Events set frontmost）
+ * 2. 等待 Space 切换动画完成（约 700ms）
+ * 3. 用 screencapture -R 截取窗口区域
  *
  * 截取区域基于 cfg.windowRegion（默认 x=0, y=33, w=1512, h=949）。
  * 坐标系：截图像素坐标与 clickCoords 坐标一致（x=0,y=0 为窗口内容左上角）。
  */
 export function screenshot(cfg: PeekabooConfig): ScreenshotResult {
+  // 切换到小红书 Space，等待动画完成
+  activateApp(cfg);
+  const waitResult = spawnSync("sleep", ["0.8"], { timeout: 2_000 });
+  void waitResult;
+
   const path = join(tmpdir(), `xhs-desktop-${Date.now()}.png`);
   const region = cfg.windowRegion ?? DEFAULT_PEEKABOO_CONFIG.windowRegion!;
 
@@ -206,7 +228,8 @@ export function screenshot(cfg: PeekabooConfig): ScreenshotResult {
  */
 export function seeElements(cfg: PeekabooConfig): SeeResult {
   // 不传 --window-title，避免 peekaboo 卡死
-  const output = runPeekaboo(["see", "--app", cfg.appName], cfg, { timeoutMs: 20_000 });
+  // 超时设为 8s（iOS App 的 see 命令可能卡死，调用方应 try/catch 降级）
+  const output = runPeekaboo(["see", "--app", cfg.appName], cfg, { timeoutMs: 8_000 });
 
   let parsed: Record<string, unknown>;
   try {

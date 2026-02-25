@@ -30,7 +30,7 @@ import {
 } from "./peekaboo.js";
 
 // ============================================================================
-// 布局常量（1512×949 窗口）
+// 布局常量（1512×949 全屏窗口，窗口相对坐标）
 // ============================================================================
 
 /**
@@ -40,9 +40,9 @@ import {
  * Y = 930（底部导航栏中心，距窗口顶部 930px，距窗口底部约 19px）。
  *
  * 这是窗口相对坐标（x=0,y=0 为窗口内容左上角），
- * clickCoords() 会自动加上屏幕偏移量（默认 y+=33）。
+ * clickCoords() 会自动加上屏幕偏移量（默认 y+=33，即绝对 y=963）。
  *
- * ⚠️ 若用户窗口尺寸不同（如多屏/缩放），需在 pluginConfig.windowRegion 中调整。
+ * ⚠️ 仅适用于全屏模式（1512×949）。非全屏时坐标会漂移，必须保持全屏。
  */
 const BOTTOM_NAV = {
   home: { x: 151, y: 930 },
@@ -54,12 +54,16 @@ const BOTTOM_NAV = {
 
 /**
  * 私信输入框坐标（聊天页面底部，窗口相对坐标）。
- * 窗口高 949px，输入框在底部约 y=910-940 区域中心。
+ * 实测：窗口内 y=930，绝对坐标 y=963。
+ * 点击后用 peekaboo type 输入文字，peekaboo press return 发送。
  */
-const INPUT_BOX = { x: 756, y: 925 };
+const INPUT_BOX = { x: 756, y: 930 };
 
-/** 返回按钮（左上角 <，窗口相对坐标）*/
-const BACK_BUTTON = { x: 20, y: 20 };
+/**
+ * 返回按钮（左上角 < 箭头，窗口相对坐标）。
+ * 实测：窗口内 x=20, y=30，绝对坐标 y=63。
+ */
+const BACK_BUTTON = { x: 20, y: 30 };
 
 // ============================================================================
 // 结果类型
@@ -130,19 +134,26 @@ function isUnreadBadge(e: PeekabooElement): boolean {
  */
 export async function scanUnread(cfg: PeekabooConfig): Promise<ImUnreadResult> {
   activateApp(cfg);
-  await sleep(400);
+  await sleep(800); // Space 切换动画需要约 700ms
 
   // 点击「消息」Tab
   clickCoords(BOTTOM_NAV.messages.x, BOTTOM_NAV.messages.y, cfg);
-  await sleep(1000);
+  await sleep(1200);
 
-  // 扫描 AX 元素，提取未读角标
-  const { elements } = seeElements(cfg);
-  const unreadBadges = elements
-    .filter(isUnreadBadge)
-    .map((e) => ({ elemId: e.id, label: e.label ?? "", description: e.description ?? "" }));
-
+  // 截图（主要信息来源，Agent 通过视觉分析识别未读消息）
   const scr = screenshot(cfg);
+
+  // 尝试扫描 AX 元素提取未读角标（peekaboo see 对 iOS App 可能超时，降级为空）
+  let unreadBadges: Array<{ elemId: string; label: string; description: string }> = [];
+  try {
+    const { elements } = seeElements(cfg);
+    unreadBadges = elements
+      .filter(isUnreadBadge)
+      .map((e) => ({ elemId: e.id, label: e.label ?? "", description: e.description ?? "" }));
+  } catch {
+    // peekaboo see 不可用（iOS App 兼容性问题），降级为纯视觉模式
+    // Agent 需完全依赖截图视觉分析来识别未读消息
+  }
 
   return {
     screenshot: scr,
@@ -158,7 +169,7 @@ export async function scanUnread(cfg: PeekabooConfig): Promise<ImUnreadResult> {
  */
 export async function getInbox(cfg: PeekabooConfig): Promise<ScreenshotResult> {
   activateApp(cfg);
-  await sleep(400);
+  await sleep(800);
 
   clickCoords(BOTTOM_NAV.messages.x, BOTTOM_NAV.messages.y, cfg);
   await sleep(1000);
@@ -185,7 +196,7 @@ export async function openConversation(
   }
 
   activateApp(cfg);
-  await sleep(300);
+  await sleep(800);
 
   let clickedAt: { x: number; y: number } | undefined;
 
@@ -220,7 +231,7 @@ export async function sendMessage(text: string, cfg: PeekabooConfig): Promise<Im
   if (!text.trim()) throw new Error("消息内容不能为空");
 
   activateApp(cfg);
-  await sleep(300);
+  await sleep(800);
 
   // 点击输入框获取焦点
   clickCoords(INPUT_BOX.x, INPUT_BOX.y, cfg);
@@ -243,7 +254,7 @@ export async function sendMessage(text: string, cfg: PeekabooConfig): Promise<Im
  */
 export async function navigateBack(cfg: PeekabooConfig): Promise<ScreenshotResult> {
   activateApp(cfg);
-  await sleep(200);
+  await sleep(800);
 
   clickCoords(BACK_BUTTON.x, BACK_BUTTON.y, cfg);
   await sleep(700);
@@ -270,10 +281,17 @@ export function takeScreenshot(cfg: PeekabooConfig): ScreenshotResult {
  */
 export async function getCurrentElements(cfg: PeekabooConfig): Promise<ImSeeResult> {
   activateApp(cfg);
-  await sleep(200);
+  await sleep(800);
 
-  const seeResult = seeElements(cfg);
   const scr = screenshot(cfg);
+
+  // peekaboo see 对小红书 iOS App 可能超时，降级为空元素列表
+  let seeResult = { elements: [] as PeekabooElement[], elementCount: 0, interactableCount: 0, snapshotId: "" };
+  try {
+    seeResult = seeElements(cfg);
+  } catch {
+    // 降级：仅返回截图，元素列表为空
+  }
 
   return {
     screenshot: scr,
@@ -291,7 +309,7 @@ export async function getCurrentElements(cfg: PeekabooConfig): Promise<ImSeeResu
  */
 export async function clearInput(cfg: PeekabooConfig): Promise<void> {
   activateApp(cfg);
-  await sleep(200);
+  await sleep(800);
 
   clickCoords(INPUT_BOX.x, INPUT_BOX.y, cfg);
   await sleep(300);
