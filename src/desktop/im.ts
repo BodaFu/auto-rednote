@@ -18,6 +18,7 @@
 
 import type { PeekabooConfig, PeekabooElement, ScreenshotResult } from "./peekaboo.js";
 import {
+  SPACE_SWITCH_WAIT_MS,
   activateApp,
   clickCoords,
   clickElement,
@@ -156,16 +157,14 @@ async function withRestore<T>(cfg: PeekabooConfig, fn: () => Promise<T>): Promis
 export async function scanUnread(cfg: PeekabooConfig): Promise<ImUnreadResult> {
   return withRestore(cfg, async () => {
     activateApp(cfg);
-    await sleep(800); // Space 切换动画需要约 700ms
+    await sleep(SPACE_SWITCH_WAIT_MS);
 
-    // 点击「消息」Tab
+    // 点击「消息」Tab，等待 Tab 内容渲染
     clickCoords(BOTTOM_NAV.messages.x, BOTTOM_NAV.messages.y, cfg);
-    await sleep(1200);
+    await sleep(500);
 
-    // 截图（主要信息来源，Agent 通过视觉分析识别未读消息）
     const scr = screenshot(cfg);
 
-    // 尝试扫描 AX 元素提取未读角标（peekaboo see 对 iOS App 可能超时，降级为空）
     let unreadBadges: Array<{ elemId: string; label: string; description: string }> = [];
     try {
       const { elements } = seeElements(cfg);
@@ -192,10 +191,10 @@ export async function scanUnread(cfg: PeekabooConfig): Promise<ImUnreadResult> {
 export async function getInbox(cfg: PeekabooConfig): Promise<ScreenshotResult> {
   return withRestore(cfg, async () => {
     activateApp(cfg);
-    await sleep(800);
+    await sleep(SPACE_SWITCH_WAIT_MS);
 
     clickCoords(BOTTOM_NAV.messages.x, BOTTOM_NAV.messages.y, cfg);
-    await sleep(1000);
+    await sleep(500);
 
     return screenshot(cfg);
   });
@@ -213,7 +212,7 @@ export async function getInbox(cfg: PeekabooConfig): Promise<ScreenshotResult> {
 export async function openConversation(
   target: { elemId?: string; x?: number; y?: number },
   cfg: PeekabooConfig,
-  waitMs = 1200,
+  waitMs = 600,
 ): Promise<ImOpenResult> {
   if (!target.elemId && (target.x === undefined || target.y === undefined)) {
     throw new Error("必须提供 elemId 或 (x, y) 坐标之一");
@@ -221,7 +220,7 @@ export async function openConversation(
 
   return withRestore(cfg, async () => {
     activateApp(cfg);
-    await sleep(800);
+    await sleep(SPACE_SWITCH_WAIT_MS);
 
     let clickedAt: { x: number; y: number } | undefined;
 
@@ -258,19 +257,19 @@ export async function sendMessage(text: string, cfg: PeekabooConfig): Promise<Im
 
   return withRestore(cfg, async () => {
     activateApp(cfg);
-    await sleep(800);
+    await sleep(SPACE_SWITCH_WAIT_MS);
 
     // 点击输入框获取焦点
     clickCoords(INPUT_BOX.x, INPUT_BOX.y, cfg);
-    await sleep(400);
+    await sleep(200);
 
     // 输入文字
     typeText(text, cfg);
-    await sleep(300);
+    await sleep(150);
 
     // 发送
     pressKey("return", cfg);
-    await sleep(800);
+    await sleep(500);
 
     return { screenshot: screenshot(cfg) };
   });
@@ -283,10 +282,10 @@ export async function sendMessage(text: string, cfg: PeekabooConfig): Promise<Im
 export async function navigateBack(cfg: PeekabooConfig): Promise<ScreenshotResult> {
   return withRestore(cfg, async () => {
     activateApp(cfg);
-    await sleep(800);
+    await sleep(SPACE_SWITCH_WAIT_MS);
 
     clickCoords(BACK_BUTTON.x, BACK_BUTTON.y, cfg);
-    await sleep(700);
+    await sleep(400);
 
     return screenshot(cfg);
   });
@@ -297,7 +296,11 @@ export async function navigateBack(cfg: PeekabooConfig): Promise<ScreenshotResul
  * 会切换到小红书 Space 截图，根据 cfg.restoreApp 决定是否切回。
  */
 export async function takeScreenshot(cfg: PeekabooConfig): Promise<ScreenshotResult> {
-  return withRestore(cfg, async () => screenshot(cfg));
+  return withRestore(cfg, async () => {
+    activateApp(cfg);
+    await sleep(SPACE_SWITCH_WAIT_MS);
+    return screenshot(cfg);
+  });
 }
 
 /**
@@ -312,7 +315,7 @@ export async function takeScreenshot(cfg: PeekabooConfig): Promise<ScreenshotRes
 export async function getCurrentElements(cfg: PeekabooConfig): Promise<ImSeeResult> {
   return withRestore(cfg, async () => {
     activateApp(cfg);
-    await sleep(800);
+    await sleep(SPACE_SWITCH_WAIT_MS);
 
     const scr = screenshot(cfg);
 
@@ -346,13 +349,13 @@ export async function getCurrentElements(cfg: PeekabooConfig): Promise<ImSeeResu
 export async function clearInput(cfg: PeekabooConfig): Promise<void> {
   return withRestore(cfg, async () => {
     activateApp(cfg);
-    await sleep(800);
+    await sleep(SPACE_SWITCH_WAIT_MS);
 
     clickCoords(INPUT_BOX.x, INPUT_BOX.y, cfg);
-    await sleep(300);
+    await sleep(150);
 
     hotkey("cmd,a", cfg);
-    await sleep(100);
+    await sleep(80);
     pressKey("delete", cfg);
   });
 }

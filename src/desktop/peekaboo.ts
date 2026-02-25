@@ -63,6 +63,17 @@ export const DEFAULT_PEEKABOO_CONFIG: PeekabooConfig = {
   restoreApp: true,
 };
 
+/**
+ * Space 切换动画等待时间（ms）。
+ *
+ * 实测：activateApp 命令本身约 130-200ms，Space 动画约 100-150ms，
+ * 合计约 250ms 后截图内容已完整。设为 350ms 保留 100ms 余量。
+ *
+ * 若截图出现黑屏或截到错误 App，可适当增大此值。
+ * 在"系统设置 → 辅助功能 → 显示 → 减少动态效果"开启后可降低到 200ms。
+ */
+export const SPACE_SWITCH_WAIT_MS = 350;
+
 // ============================================================================
 // 类型定义
 // ============================================================================
@@ -155,16 +166,23 @@ function runPeekaboo(
 
 /**
  * 获取当前前台 App 的名称（用于操作完成后切回）。
+ *
+ * 使用 `path to frontmost application`（约 80ms），比
+ * `System Events get name of first process whose frontmost is true`（约 400ms）快 5 倍。
+ * 返回 App bundle 名（如 "Cursor"、"Feishu"、"Lark"），不含 .app 后缀。
  * 如果无法获取，返回 null（此时 restoreApp 的切回操作将跳过）。
  */
 export function getFrontmostApp(): string | null {
   const result = spawnSync(
     "/usr/bin/osascript",
-    ["-e", 'tell application "System Events" to get name of first process whose frontmost is true'],
-    { encoding: "utf-8", timeout: 3_000 },
+    ["-e", "path to frontmost application as text"],
+    { encoding: "utf-8", timeout: 2_000 },
   );
-  const name = result.stdout?.trim();
-  return name && result.status === 0 ? name : null;
+  if (result.status !== 0 || !result.stdout?.trim()) return null;
+  // 路径格式: "Macintosh HD:Applications:Cursor.app:" → "Cursor"
+  const raw = result.stdout.trim();
+  const match = raw.match(/:([^:]+)\.app:?$/);
+  return match ? match[1] : raw;
 }
 
 /**
@@ -210,24 +228,13 @@ export function sleep(ms: number): Promise<void> {
 /**
  * 截图小红书主窗口，返回文件路径 + base64。
  *
- * 小红书是全屏 App，运行在独立 Space。截图前必须先切换到该 Space，
- * 否则 screencapture 截到的是当前 Space（其他 App）。
- *
- * 流程：
- * 1. 调用 activateApp 切换到小红书 Space（System Events set frontmost）
- * 2. 等待 Space 切换动画完成（约 700ms）
- * 3. 用 screencapture -R 截取窗口区域
+ * 前置条件：调用方必须已通过 activateApp + sleep(SPACE_SWITCH_WAIT_MS) 切换到小红书 Space，
+ * 否则 screencapture 会截到当前 Space 的其他 App。
  *
  * 截取区域基于 cfg.windowRegion（默认 x=0, y=33, w=1512, h=949）。
  * 坐标系：截图像素坐标与 clickCoords 坐标一致（x=0,y=0 为窗口内容左上角）。
- *
- * 注意：切回原 App 由调用方（im.ts 的操作函数）负责，不在此处处理，
- * 以便在整个操作序列（activate → click → type → screenshot）完成后统一切回。
  */
 export function screenshot(cfg: PeekabooConfig): ScreenshotResult {
-  activateApp(cfg);
-  spawnSync("sleep", ["0.8"], { timeout: 2_000 });
-
   const path = join(tmpdir(), `xhs-desktop-${Date.now()}.png`);
   const region = cfg.windowRegion ?? DEFAULT_PEEKABOO_CONFIG.windowRegion!;
 
@@ -251,6 +258,18 @@ export function screenshot(cfg: PeekabooConfig): ScreenshotResult {
   const data = readFileSync(path);
   const base64 = data.toString("base64");
   return { path, base64, dataUri: `data:image/png;base64,${base64}` };
+}
+
+/**
+ * 激活 App 并等待 Space 切换动画完成，然后截图。
+ *
+ * 等同于 activateApp + sleep(SPACE_SWITCH_WAIT_MS) + screenshot，
+ * 用于需要独立截图（不在连续操作序列中）的场景。
+ */
+export async function activateAndScreenshot(cfg: PeekabooConfig): Promise<ScreenshotResult> {
+  activateApp(cfg);
+  await sleep(SPACE_SWITCH_WAIT_MS);
+  return screenshot(cfg);
 }
 
 // ============================================================================

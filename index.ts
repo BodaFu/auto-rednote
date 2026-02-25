@@ -954,11 +954,10 @@ export default function register(api: OpenClawPluginApi) {
     {
       name: "xhs_desktop_screenshot",
       description: `截图小红书桌面 App 当前界面。
-无需激活 App，直接捕获当前窗口内容。
 适用于：确认当前页面状态、调试交互结果、在不需要完整 IM 流程时快速查看界面。`,
       parameters: Type.Object({}),
       async execute(_id: string, _params: Record<string, unknown>) {
-        const scr = takeScreenshot(peekabooConfig);
+        const scr = await takeScreenshot(peekabooConfig);
         return {
           content: [
             { type: "text" as const, text: `截图已返回（路径: ${scr.path}）` },
