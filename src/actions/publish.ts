@@ -110,11 +110,9 @@ async function publishImageNote(
     await clickPublishTab(targetId, "上传图文", profile);
     await sleep(1000);
 
-    if (params.mediaPaths.length === 0) {
-      return { success: false, message: "至少需要提供一张图片" };
+    if (params.mediaPaths.length > 0) {
+      await uploadImages(targetId, params.mediaPaths, profile);
     }
-
-    await uploadImages(targetId, params.mediaPaths, profile);
 
     await inputTitle(targetId, params.title, profile);
     await sleep(300);

@@ -695,10 +695,10 @@ export default function register(api: OpenClawPluginApi) {
         }),
         title: Type.String({ description: "笔记标题（最多20字）" }),
         content: Type.String({ description: "笔记正文" }),
-        mediaPaths: Type.Array(Type.String(), {
+        mediaPaths: Type.Optional(Type.Array(Type.String(), {
           description:
-            "媒体文件的本地路径列表（图文：图片路径数组；视频：视频文件路径数组，只取第一个）",
-        }),
+            "媒体文件的本地路径列表（图文：图片路径数组；视频：视频文件路径数组，只取第一个）。图文类型可不传，发布纯文字笔记",
+        })),
         tags: Type.Optional(Type.Array(Type.String(), { description: "标签列表（不含#号）" })),
         scheduleAt: Type.Optional(
           Type.String({ description: "定时发布时间，格式：YYYY-MM-DD HH:mm" }),
@@ -713,7 +713,7 @@ export default function register(api: OpenClawPluginApi) {
         const scheduleAt = typeof params.scheduleAt === "string" ? params.scheduleAt : undefined;
 
         if (!title.trim()) throw new Error("title 不能为空");
-        if (mediaPaths.length === 0) throw new Error("mediaPaths 不能为空");
+        if (type === "video" && mediaPaths.length === 0) throw new Error("视频笔记必须提供 mediaPaths");
 
         const result = await publishNote(
           { type, title, content, mediaPaths, tags, scheduleAt },

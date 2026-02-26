@@ -308,8 +308,16 @@ export async function getFeed(
   const noteEntry = noteMap[feedId] ?? Object.values(noteMap)[0];
   if (!noteEntry || typeof noteEntry !== "object") return null;
 
-  const entry = noteEntry as Record<string, unknown>;
-  const feedDetail = parseFeedDetail(entry.note ?? entry);
+  // Vue 响应式 Proxy 残留解包
+  let entry = noteEntry as Record<string, unknown>;
+  if (entry._value && typeof entry._value === "object") entry = entry._value as Record<string, unknown>;
+
+  let noteData = (entry.note ?? entry) as Record<string, unknown>;
+  if (noteData && typeof noteData === "object" && noteData._value && typeof noteData._value === "object") {
+    noteData = noteData._value as Record<string, unknown>;
+  }
+
+  const feedDetail = parseFeedDetail(noteData);
 
   // 优先使用 API 拦截的评论数据（包含真实 ID）
   const commentApiResponse = commentApiPromise ? await commentApiPromise : null;

@@ -311,6 +311,18 @@ export async function extractInitialState(
 ): Promise<unknown> {
   const fn = `() => {
     try {
+      function unwrap(obj, depth) {
+        if (depth > 8 || obj == null || typeof obj !== 'object') return obj;
+        var v = obj._value !== undefined ? obj._value : (obj.value !== undefined && !Array.isArray(obj) && typeof obj.value !== 'string' ? obj.value : obj);
+        if (v !== obj) return unwrap(v, depth + 1);
+        if (Array.isArray(v)) return v.map(function(item) { return unwrap(item, depth + 1); });
+        var result = {};
+        var keys = Object.keys(v);
+        for (var i = 0; i < keys.length; i++) {
+          result[keys[i]] = unwrap(v[keys[i]], depth + 1);
+        }
+        return result;
+      }
       const state = window.__INITIAL_STATE__;
       if (!state) return null;
       const parts = ${JSON.stringify(path)}.split('.');
@@ -320,8 +332,7 @@ export async function extractInitialState(
         cur = cur[p];
       }
       if (cur == null) return null;
-      const val = cur._value !== undefined ? cur._value : (cur.value !== undefined ? cur.value : cur);
-      return JSON.stringify(val);
+      return JSON.stringify(unwrap(cur, 0));
     } catch (e) {
       return null;
     }
@@ -348,6 +359,12 @@ export async function waitForInitialState(
 ): Promise<unknown> {
   const fn = `() => {
     try {
+      function unwrapCheck(obj, depth) {
+        if (depth > 8 || obj == null || typeof obj !== 'object') return obj;
+        if (obj._value !== undefined) return unwrapCheck(obj._value, depth + 1);
+        if (obj.value !== undefined && !Array.isArray(obj) && typeof obj.value !== 'string') return unwrapCheck(obj.value, depth + 1);
+        return obj;
+      }
       const state = window.__INITIAL_STATE__;
       if (!state) return false;
       const parts = ${JSON.stringify(path)}.split('.');
@@ -356,7 +373,7 @@ export async function waitForInitialState(
         if (cur == null) return false;
         cur = cur[p];
       }
-      const val = cur?._value !== undefined ? cur._value : (cur?.value !== undefined ? cur.value : cur);
+      const val = unwrapCheck(cur, 0);
       return val != null && (Array.isArray(val) ? val.length > 0 : true);
     } catch {
       return false;
