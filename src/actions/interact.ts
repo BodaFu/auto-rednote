@@ -6,6 +6,9 @@ import {
   navigateWithWarmup,
   navigate,
   getOrCreateXhsTab,
+  closeTab,
+  openTab,
+  installNavigationGuard,
   evaluate,
   waitForInitialState,
   act,
@@ -14,6 +17,45 @@ import {
 } from "../browser.js";
 
 const XHS_HOME = "https://www.xiaohongshu.com";
+
+// ============================================================================
+// 导航到帖子并确认页面加载成功，失败时自动重试
+// ============================================================================
+
+async function navigateToPost(
+  feedId: string,
+  url: string,
+  profile?: string,
+): Promise<{ targetId: string } | null> {
+  // 第一次：复用已有标签页
+  const { targetId } = await navigateWithWarmup(url, profile);
+
+  // 验证当前 URL 确实导航到了目标页面
+  const currentUrl = (await evaluate(targetId, "() => window.location.href", profile).catch(() => "")) as string;
+  if (currentUrl?.includes(feedId)) {
+    const loaded = await waitForInitialState(targetId, "note.noteDetailMap", 15000, profile).catch(() => null);
+    if (loaded) return { targetId };
+  }
+
+  // 第一次重试：强制再次导航（可能上次 navigate 静默失败）
+  await navigate(targetId, url, profile).catch(() => null);
+  await sleep(3000);
+  const retryUrl = (await evaluate(targetId, "() => window.location.href", profile).catch(() => "")) as string;
+  if (retryUrl?.includes(feedId)) {
+    const loaded = await waitForInitialState(targetId, "note.noteDetailMap", 12000, profile).catch(() => null);
+    if (loaded) return { targetId };
+  }
+
+  // 第二次重试：关闭旧标签页，开全新标签页
+  await closeTab(targetId, profile).catch(() => null);
+  const fresh = await openTab(url, profile);
+  await sleep(3000);
+  await installNavigationGuard(fresh.targetId, profile);
+  const freshLoaded = await waitForInitialState(fresh.targetId, "note.noteDetailMap", 15000, profile).catch(() => null);
+  if (freshLoaded) return { targetId: fresh.targetId };
+
+  return null;
+}
 
 // ============================================================================
 // 发表评论
@@ -26,24 +68,85 @@ export async function postComment(
   profile?: string,
 ): Promise<{ success: boolean; message: string }> {
   const url = `${XHS_HOME}/explore/${feedId}?xsec_token=${encodeURIComponent(xsecToken)}&xsec_source=pc_feed`;
-  const { targetId } = await navigateWithWarmup(url, profile);
 
-  // 等待评论区加载
+  const nav = await navigateToPost(feedId, url, profile);
+  if (!nav) {
+    return { success: false, message: "页面加载超时，多次尝试均未能打开帖子" };
+  }
+  const targetId = nav.targetId;
+
+  // 检查该笔记是否支持评论（部分笔记作者关闭了评论）
+  const commentDisabled = await evaluate(
+    targetId,
+    `() => {
+      try {
+        const state = window.__INITIAL_STATE__;
+        if (!state?.note?.noteDetailMap) return false;
+        const keys = Object.keys(state.note.noteDetailMap);
+        if (keys.length === 0) return false;
+        const note = state.note.noteDetailMap[keys[0]];
+        const n = note?.note || note;
+        if (n?.interactInfo?.commentDisabled) return true;
+        if (n?.noteControls?.disableComment) return true;
+      } catch {}
+      return false;
+    }`,
+    profile,
+  );
+  if (commentDisabled === true) {
+    return { success: false, message: "该帖子已关闭评论" };
+  }
+
+  // 滚动到评论区触发渲染
+  await evaluate(
+    targetId,
+    `() => {
+      const area = document.querySelector('.comments-container, .note-scroller, #noteContainer');
+      if (area) area.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    }`,
+    profile,
+  );
+  await sleep(1000);
+
+  // 等待评论输入框出现（比只查容器更精准）
   let commentAreaReady = false;
-  for (let i = 0; i < 15; i++) {
+  for (let i = 0; i < 20; i++) {
     const found = await evaluate(
       targetId,
-      `() => document.querySelector('#noteContainer, .note-container, .note-scroller, .comments-container') ? 1 : 0`,
+      `() => {
+        if (document.querySelector('div.input-box div.content-edit span')) return 2;
+        if (document.querySelector('#noteContainer, .note-container, .note-scroller, .comments-container')) return 1;
+        return 0;
+      }`,
       profile,
     );
-    if (found === 1) {
+    if (found === 2) {
       commentAreaReady = true;
       break;
+    }
+    if (found === 1 && i >= 5) {
+      // 容器存在但输入框没出现，尝试点击评论区域触发
+      await evaluate(
+        targetId,
+        `() => {
+          const area = document.querySelector('.comments-container, .note-scroller');
+          if (area) area.scrollIntoView({ behavior: 'instant', block: 'center' });
+        }`,
+        profile,
+      );
     }
     await sleep(1000);
   }
   if (!commentAreaReady) {
-    return { success: false, message: "评论区未出现，该帖子可能不支持评论" };
+    // 最后用容器存在作为降级判断
+    const containerExists = await evaluate(
+      targetId,
+      `() => document.querySelector('#noteContainer, .note-container, .note-scroller, .comments-container') ? 1 : 0`,
+      profile,
+    );
+    if (containerExists !== 1) {
+      return { success: false, message: "页面加载超时，未能打开帖子" };
+    }
   }
   await sleep(500);
 
@@ -328,10 +431,11 @@ export async function likeFeed(
   profile?: string,
 ): Promise<{ success: boolean; liked: boolean; message: string }> {
   const url = `${XHS_HOME}/explore/${feedId}?xsec_token=${encodeURIComponent(xsecToken)}&xsec_source=pc_feed`;
-  const { targetId } = await navigateWithWarmup(url, profile);
-
-  // 等待帖子详情加载
-  await waitForInitialState(targetId, "note.noteDetailMap", 10000, profile);
+  const nav = await navigateToPost(feedId, url, profile);
+  if (!nav) {
+    return { success: false, liked: false, message: "页面加载超时，未能打开帖子" };
+  }
+  const targetId = nav.targetId;
   await sleep(500);
 
   // 读取当前点赞状态
@@ -395,9 +499,11 @@ export async function collectFeed(
   profile?: string,
 ): Promise<{ success: boolean; collected: boolean; message: string }> {
   const url = `${XHS_HOME}/explore/${feedId}?xsec_token=${encodeURIComponent(xsecToken)}&xsec_source=pc_feed`;
-  const { targetId } = await navigateWithWarmup(url, profile);
-
-  await waitForInitialState(targetId, "note.noteDetailMap", 10000, profile);
+  const nav = await navigateToPost(feedId, url, profile);
+  if (!nav) {
+    return { success: false, collected: false, message: "页面加载超时，未能打开帖子" };
+  }
+  const targetId = nav.targetId;
   await sleep(500);
 
   const currentCollected = await getCollectStatus(targetId, feedId, profile);

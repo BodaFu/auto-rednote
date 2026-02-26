@@ -6,6 +6,8 @@ import {
   navigateWithWarmup,
   navigate,
   getOrCreateXhsTab,
+  closeTab,
+  openTab,
   evaluate,
   extractInitialState,
   waitForInitialState,
@@ -20,6 +22,7 @@ import type {
   XhsFeedDetail,
   XhsCommentList,
   XhsComment,
+  XhsSubComment,
   XhsUserProfile,
   MyNote,
 } from "../types.js";
@@ -266,20 +269,37 @@ export async function getFeed(
 ): Promise<{ feed: XhsFeedDetail; comments: XhsCommentList } | null> {
   const url = `${XHS_HOME}/explore/${feedId}?xsec_token=${encodeURIComponent(xsecToken)}&xsec_source=pc_feed`;
 
-  // 在导航前启动评论 API 拦截
-  const targetId = await getOrCreateXhsTab(profile);
-  const commentApiPromise = waitForResponseBody(
-    targetId,
-    "*/api/sns/web/v2/comment/page*",
-    15000,
-    profile,
-  ).catch(() => null);
+  let targetId = await getOrCreateXhsTab(profile);
+  let noteDetailMap: unknown = null;
+  let commentApiPromise: Promise<{ url: string; status?: number; body: string } | null> | null = null;
 
-  await navigate(targetId, url, profile).catch(() => null);
-  await sleep(2000);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt === 2) {
+      // 最后一次：关闭旧标签页，开全新标签页
+      await closeTab(targetId, profile).catch(() => null);
+      const fresh = await openTab(url, profile);
+      targetId = fresh.targetId;
+      await sleep(3000);
+    } else {
+      // 第 0/1 次：复用现有标签页，发起/重发导航
+      commentApiPromise = waitForResponseBody(
+        targetId,
+        "*/api/sns/web/v2/comment/page*",
+        15000,
+        profile,
+      ).catch(() => null);
+      await navigate(targetId, url, profile).catch(() => null);
+      await sleep(attempt === 0 ? 2000 : 3000);
+    }
 
-  // 等待帖子详情数据
-  const noteDetailMap = await waitForInitialState(targetId, "note.noteDetailMap", 10000, profile);
+    // 验证 URL 是否已导航到目标页面
+    const currentUrl = (await evaluate(targetId, "() => window.location.href", profile).catch(() => "")) as string;
+    if (!currentUrl?.includes(feedId)) continue;
+
+    noteDetailMap = await waitForInitialState(targetId, "note.noteDetailMap", 10000, profile).catch(() => null);
+    if (noteDetailMap && typeof noteDetailMap === "object") break;
+  }
+
   if (!noteDetailMap || typeof noteDetailMap !== "object") {
     return null;
   }
@@ -292,7 +312,7 @@ export async function getFeed(
   const feedDetail = parseFeedDetail(entry.note ?? entry);
 
   // 优先使用 API 拦截的评论数据（包含真实 ID）
-  const commentApiResponse = await commentApiPromise;
+  const commentApiResponse = commentApiPromise ? await commentApiPromise : null;
   let comments: XhsCommentList = { list: [] };
 
   if (commentApiResponse?.body) {
@@ -902,6 +922,411 @@ export async function followUser(
         : "关注成功"
       : `操作可能未生效（按钮文字: "${btnText}"）`,
   };
+}
+
+// ============================================================================
+// 获取某条评论的所有子评论
+// ============================================================================
+
+export async function getSubComments(
+  feedId: string,
+  xsecToken: string,
+  parentCommentId: string,
+  profile?: string,
+): Promise<{ subComments: XhsSubComment[]; parentFound: boolean; message: string }> {
+  const url = `${XHS_HOME}/explore/${feedId}?xsec_token=${encodeURIComponent(xsecToken)}&xsec_source=pc_feed`;
+  const targetId = await getOrCreateXhsTab(profile);
+
+  await navigate(targetId, url, profile).catch(() => null);
+  await sleep(2000);
+
+  // 等待评论区加载
+  let commentAreaReady = false;
+  for (let i = 0; i < 15; i++) {
+    const found = await evaluate(
+      targetId,
+      `() => document.querySelector('#noteContainer, .note-container, .note-scroller, .comments-container') ? 1 : 0`,
+      profile,
+    );
+    if (found === 1) {
+      commentAreaReady = true;
+      break;
+    }
+    await sleep(1000);
+  }
+  if (!commentAreaReady) {
+    return { subComments: [], parentFound: false, message: "评论区不可用" };
+  }
+
+  // 页面加载完成后注入 API 拦截器（必须在 navigate 之后，否则页面导航会重置 JS 上下文）
+  await injectSubCommentAPIInterceptor(targetId, profile);
+
+  // 滚动查找父评论
+  const parentFound = await scrollToParentComment(targetId, parentCommentId, profile);
+  if (!parentFound) {
+    return { subComments: [], parentFound: false, message: `未找到父评论 ${parentCommentId}` };
+  }
+
+  // 点击"展开 N 条回复"
+  const expandResult = await evaluate(
+    targetId,
+    `() => {
+      const parentEl = document.getElementById('comment-${parentCommentId}');
+      if (!parentEl) return 'parent-el-not-found';
+      const parentComment = parentEl.closest('.parent-comment') || parentEl.parentElement;
+      if (!parentComment) return 'parent-comment-not-found';
+      const showMore = parentComment.querySelector('.show-more');
+      if (!showMore) return 'no-show-more';
+      showMore.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      showMore.click();
+      return showMore.textContent?.trim() || 'clicked';
+    }`,
+    profile,
+  );
+  if (expandResult !== "parent-el-not-found" && expandResult !== "parent-comment-not-found" && expandResult !== "no-show-more") {
+    await sleep(3000);
+  }
+
+  // 循环点击"展开更多回复"直到没有更多
+  const maxExpandRounds = 30;
+  for (let i = 0; i < maxExpandRounds; i++) {
+    const moreText = await evaluate(
+      targetId,
+      `() => {
+        const parentEl = document.getElementById('comment-${parentCommentId}');
+        if (!parentEl) return 'parent-lost';
+        const parentComment = parentEl.closest('.parent-comment') || parentEl.parentElement;
+        if (!parentComment) return 'no-parent-comment';
+        const showMore = parentComment.querySelector('.show-more');
+        if (!showMore) return 'no-more';
+        showMore.scrollIntoView({ block: 'center' });
+        showMore.click();
+        return showMore.textContent?.trim() || 'clicked';
+      }`,
+      profile,
+    );
+    if (moreText === "no-more" || moreText === "parent-lost" || moreText === "no-parent-comment") {
+      break;
+    }
+    await sleep(2000);
+  }
+
+  // 优先从拦截的 API 响应中提取子评论（结构化数据，user_info 准确）
+  const fromAPI = await readAllInterceptedComments(targetId, parentCommentId, profile);
+  if (fromAPI.length > 0) {
+    return {
+      subComments: fromAPI,
+      parentFound: true,
+      message: `成功获取 ${fromAPI.length} 条子评论`,
+    };
+  }
+
+  // API 拦截未捕获数据时，回退到 DOM 提取（解析文本以分离作者和内容）
+  const fromDOM = await extractSubCommentsFromDOM(targetId, parentCommentId, profile);
+  if (fromDOM.length > 0) {
+    return {
+      subComments: fromDOM,
+      parentFound: true,
+      message: `成功获取 ${fromDOM.length} 条子评论（DOM 提取，作者信息可能不完整）`,
+    };
+  }
+
+  return { subComments: [], parentFound: true, message: "未能提取子评论（API 拦截和 DOM 提取均无结果）" };
+}
+
+// 注入宽泛的评论 API 拦截器，捕获所有包含 "comment" 的 API 响应
+async function injectSubCommentAPIInterceptor(targetId: string, profile?: string): Promise<void> {
+  await evaluate(
+    targetId,
+    `() => {
+      if (window.__subCommentInterceptorInstalled) return;
+      window.__subCommentInterceptorInstalled = true;
+      window.__interceptedCommentResponses = [];
+
+      const origFetch = window.fetch;
+      window.fetch = async function(...args) {
+        const response = await origFetch.apply(this, args);
+        const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url ?? '');
+        if (url.includes('/comment/')) {
+          const clone = response.clone();
+          clone.text().then(body => {
+            try {
+              const parsed = JSON.parse(body);
+              if (parsed.success && parsed.data && Array.isArray(parsed.data.comments)) {
+                window.__interceptedCommentResponses.push({ url, body });
+              }
+            } catch {}
+          }).catch(() => {});
+        }
+        return response;
+      };
+
+      const origXHROpen = XMLHttpRequest.prototype.open;
+      const origXHRSend = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+        this.__xhrUrl = url;
+        return origXHROpen.call(this, method, url, ...rest);
+      };
+      XMLHttpRequest.prototype.send = function(...args) {
+        const url = this.__xhrUrl || '';
+        if (url.includes('/comment/')) {
+          this.addEventListener('load', () => {
+            try {
+              const parsed = JSON.parse(this.responseText);
+              if (parsed.success && parsed.data && Array.isArray(parsed.data.comments)) {
+                window.__interceptedCommentResponses.push({ url, body: this.responseText });
+              }
+            } catch {}
+          });
+        }
+        return origXHRSend.apply(this, args);
+      };
+    }`,
+    profile,
+  );
+}
+
+// 从所有拦截的评论 API 中提取子评论（sub/page 的直接结果 + 主评论 API 中嵌套的 sub_comments）
+async function readAllInterceptedComments(
+  targetId: string,
+  parentCommentId: string,
+  profile?: string,
+): Promise<XhsSubComment[]> {
+  const raw = await evaluate(
+    targetId,
+    `() => JSON.stringify(window.__interceptedCommentResponses ?? [])`,
+    profile,
+  );
+  if (typeof raw !== "string") return [];
+
+  try {
+    const entries = JSON.parse(raw) as Array<{ url: string; body: string }>;
+    const seen = new Set<string>();
+    const result: XhsSubComment[] = [];
+
+    const pushComment = (c: { id: string; content: string; user_info?: { user_id?: string; nickname?: string } }) => {
+      if (!c.id || seen.has(c.id) || c.id === parentCommentId) return;
+      seen.add(c.id);
+      result.push({
+        id: c.id,
+        content: c.content,
+        userId: c.user_info?.user_id ?? "",
+        userInfo: c.user_info?.nickname
+          ? { userId: c.user_info.user_id ?? "", nickname: c.user_info.nickname }
+          : undefined,
+      });
+    };
+
+    for (const entry of entries) {
+      const resp = JSON.parse(entry.body) as {
+        data?: {
+          comments?: Array<{
+            id: string;
+            content: string;
+            user_info?: { user_id?: string; nickname?: string };
+            sub_comments?: Array<{
+              id: string;
+              content: string;
+              user_info?: { user_id?: string; nickname?: string };
+            }>;
+          }>;
+        };
+      };
+
+      const isSubPage = entry.url.includes("/comment/sub/");
+      for (const c of resp.data?.comments ?? []) {
+        if (isSubPage) {
+          // sub/page 接口：comments 数组直接就是子评论
+          pushComment(c);
+        } else {
+          // 主评论 page 接口：只取匹配父评论的 sub_comments
+          if (c.id === parentCommentId) {
+            for (const s of c.sub_comments ?? []) {
+              pushComment(s);
+            }
+          }
+        }
+      }
+    }
+    return result;
+  } catch {
+    return [];
+  }
+}
+
+// DOM 兜底：从页面 DOM 提取子评论，解析 "回复 XXX : " 前缀
+async function extractSubCommentsFromDOM(
+  targetId: string,
+  parentCommentId: string,
+  profile?: string,
+): Promise<XhsSubComment[]> {
+  const raw = await evaluate(
+    targetId,
+    `() => {
+      const stripPrefix = id => id.startsWith('comment-') ? id.slice(8) : id;
+      const parentEl = document.getElementById('comment-${parentCommentId}');
+      if (!parentEl) return JSON.stringify([]);
+      const parentComment = parentEl.closest('.parent-comment') || parentEl.parentElement;
+      if (!parentComment) return JSON.stringify([]);
+
+      const subs = [];
+      const parentId = 'comment-${parentCommentId}';
+
+      parentComment.querySelectorAll('[id^="comment-"]').forEach(el => {
+        if (el.id === parentId) return;
+
+        // 取所有 .name 元素，区分作者和被回复人
+        const allNameEls = el.querySelectorAll('.name, .author-name, .nickname');
+        let authorName = '';
+        for (const n of allNameEls) {
+          // 不在 .note-text / .reply-content 内的是作者
+          if (!n.closest('.note-text, .reply-content, .reply-to-container')) {
+            authorName = n.textContent?.trim() || '';
+            if (authorName) break;
+          }
+        }
+
+        // 提取完整文本内容
+        const contentEl = el.querySelector('.note-text, .content, .comment-content');
+        let fullText = contentEl ? contentEl.textContent?.trim() : el.textContent?.trim()?.slice(0, 300) || '';
+
+        // 解析 "回复 XXX : " 前缀，提取干净内容
+        let replyTarget = '';
+        let cleanContent = fullText;
+        const m = fullText.match(/^回复\\s+(.+?)\\s*[：:]\\s*/);
+        if (m) {
+          replyTarget = m[1];
+          cleanContent = fullText.slice(m[0].length);
+        }
+
+        // 如果 authorName 为空但等于 replyTarget，说明选择器拿到的是被回复人
+        if (authorName && authorName === replyTarget) authorName = '';
+        // 如果仍为空，取第一个 .name 作为最后尝试（可能是作者也可能是被回复人）
+        if (!authorName && allNameEls.length > 0) {
+          const firstNameText = allNameEls[0].textContent?.trim() || '';
+          if (firstNameText !== replyTarget) authorName = firstNameText;
+        }
+
+        subs.push({
+          id: stripPrefix(el.id || ''),
+          content: cleanContent,
+          userId: el.getAttribute('data-user-id') || '',
+          nickname: authorName,
+          replyTarget,
+        });
+      });
+      return JSON.stringify(subs);
+    }`,
+    profile,
+  );
+
+  if (typeof raw !== "string") return [];
+  try {
+    const items = JSON.parse(raw) as Array<{
+      id: string;
+      content: string;
+      userId: string;
+      nickname: string;
+      replyTarget: string;
+    }>;
+    return items
+      .filter((s) => s.content)
+      .map((s) => ({
+        id: s.id,
+        content: s.content,
+        userId: s.userId,
+        userInfo: s.nickname ? { userId: s.userId, nickname: s.nickname } : undefined,
+      }));
+  } catch {
+    return [];
+  }
+}
+
+// 滚动查找顶级评论（复用 loadComments 的滚动逻辑）
+async function scrollToParentComment(
+  targetId: string,
+  commentId: string,
+  profile?: string,
+): Promise<boolean> {
+  // 先检查是否已在 DOM 中
+  const alreadyVisible = await evaluate(
+    targetId,
+    `() => {
+      const el = document.getElementById('comment-${commentId}');
+      if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); return true; }
+      return false;
+    }`,
+    profile,
+  );
+  if (alreadyVisible === true) return true;
+
+  // 滚动到评论区
+  await evaluate(
+    targetId,
+    `() => {
+      const el = document.querySelector('.comments-container, #comments');
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }`,
+    profile,
+  );
+  await sleep(800);
+
+  // 滚动加载更多评论，最多 20 轮
+  let prevCount = 0;
+  let stagnant = 0;
+  for (let page = 0; page < 20; page++) {
+    const found = await evaluate(
+      targetId,
+      `() => {
+        const el = document.getElementById('comment-${commentId}');
+        if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); return true; }
+        return false;
+      }`,
+      profile,
+    );
+    if (found === true) return true;
+
+    const count = await getCommentCount(targetId, profile);
+    const isEnd = await evaluate(
+      targetId,
+      `() => !!document.querySelector('.end-container, [class*="the-end"]')`,
+      profile,
+    );
+    if (isEnd === true) break;
+
+    if (count === prevCount) {
+      stagnant++;
+      if (stagnant >= 3) break;
+      await evaluate(targetId, `() => window.scrollBy(0, window.innerHeight * 2)`, profile);
+    } else {
+      stagnant = 0;
+    }
+    prevCount = count;
+
+    await evaluate(
+      targetId,
+      `() => {
+        const comments = document.querySelectorAll('.parent-comment');
+        const last = comments[comments.length - 1];
+        if (last) last.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        else window.scrollBy(0, window.innerHeight);
+      }`,
+      profile,
+    );
+    await sleep(600);
+  }
+
+  // 最后再检查一次
+  const finalCheck = await evaluate(
+    targetId,
+    `() => {
+      const el = document.getElementById('comment-${commentId}');
+      if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); return true; }
+      return false;
+    }`,
+    profile,
+  );
+  return finalCheck === true;
 }
 
 // ============================================================================

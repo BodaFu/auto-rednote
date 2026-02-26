@@ -227,7 +227,7 @@ export async function sleep(ms: number): Promise<void> {
 // 安装拦截器阻止所有非 creator 域名的 <a> 点击跳转。
 // ============================================================================
 
-async function installNavigationGuard(targetId: string, profile?: string): Promise<void> {
+export async function installNavigationGuard(targetId: string, profile?: string): Promise<void> {
   await evaluate(
     targetId,
     `() => {

@@ -49,6 +49,7 @@ import {
   listFeeds,
   searchFeeds,
   getFeed,
+  getSubComments,
   getUserProfile,
   getMyProfile,
   getMyNotes,
@@ -202,14 +203,23 @@ export default function register(api: OpenClawPluginApi) {
     {
       name: "xhs_list_feeds",
       description:
-        "获取小红书首页推荐 Feed 列表。返回笔记列表，包含 id、xsecToken、标题、用户、互动数据。",
-      parameters: Type.Object({}),
-      async execute(_id: string, _params: Record<string, unknown>) {
-        const feeds = await listFeeds(browserProfile);
-        const text = `获取到 ${feeds.length} 条推荐笔记`;
+        "获取小红书首页推荐 Feed 列表。返回笔记列表，包含 id、xsecToken、标题、用户、互动数据。默认返回前 10 条（省 token），可通过 limit 调整。",
+      parameters: Type.Object({
+        limit: Type.Optional(
+          Type.Number({ description: "最大返回数量（默认 10，设为 0 返回全部）" }),
+        ),
+      }),
+      async execute(_id: string, params: Record<string, unknown>) {
+        const allFeeds = await listFeeds(browserProfile);
+        const limit = typeof params.limit === "number" ? params.limit : 10;
+        const feeds = limit > 0 ? allFeeds.slice(0, limit) : allFeeds;
+        const text =
+          feeds.length < allFeeds.length
+            ? `获取到 ${allFeeds.length} 条推荐笔记，返回前 ${feeds.length} 条`
+            : `获取到 ${feeds.length} 条推荐笔记`;
         return {
           content: [{ type: "text" as const, text: `${text}\n${JSON.stringify(feeds, null, 2)}` }],
-          details: { count: feeds.length, feeds },
+          details: { count: feeds.length, total: allFeeds.length, feeds },
         };
       },
     },
@@ -332,6 +342,37 @@ export default function register(api: OpenClawPluginApi) {
 
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+          details: result,
+        };
+      },
+    },
+    { optional: true },
+  );
+
+  api.registerTool(
+    {
+      name: "xhs_get_sub_comments",
+      description:
+        "获取某条评论下的所有子评论。适用于需要查看完整子评论列表的场景（如查找特定用户的回复）。会自动展开所有「展开更多回复」，最多 30 轮。",
+      parameters: Type.Object({
+        feedId: Type.String({ description: "笔记 ID" }),
+        xsecToken: Type.String({ description: "xsec_token" }),
+        parentCommentId: Type.String({ description: "父评论 ID（要展开子评论的那条顶级评论）" }),
+      }),
+      async execute(_id: string, params: Record<string, unknown>) {
+        const feedId = String(params.feedId ?? "");
+        const xsecToken = String(params.xsecToken ?? "");
+        const parentCommentId = String(params.parentCommentId ?? "");
+        if (!feedId) throw new Error("feedId 不能为空");
+        if (!xsecToken) throw new Error("xsecToken 不能为空");
+        if (!parentCommentId) throw new Error("parentCommentId 不能为空");
+
+        const result = await getSubComments(feedId, xsecToken, parentCommentId, browserProfile);
+        const text = result.parentFound
+          ? `${result.message}\n${JSON.stringify(result.subComments, null, 2)}`
+          : result.message;
+        return {
+          content: [{ type: "text" as const, text }],
           details: result,
         };
       },
