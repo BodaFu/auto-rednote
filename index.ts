@@ -7,7 +7,7 @@
  * 同时通过 peekaboo CLI 控制小红书桌面 App（iOS on macOS）
  * 实现网页端不支持的私信（IM）操作能力。
  *
- * 工具列表（25个）：
+ * 工具列表（24个）：
  * 账号工具：
  * - xhs_check_login           检查登录状态
  * - xhs_get_qrcode            获取登录二维码
@@ -17,6 +17,7 @@
  * - xhs_list_feeds            获取推荐 Feed 列表
  * - xhs_search                搜索内容
  * - xhs_get_feed              获取帖子详情（含评论）
+ * - xhs_get_sub_comments      获取子评论列表
  * - xhs_get_user              获取用户主页
  * 互动工具：
  * - xhs_post_comment          发表评论
@@ -25,7 +26,6 @@
  * - xhs_collect               收藏 / 取消收藏
  * - xhs_follow                关注 / 取消关注用户
  * 通知工具：
- * - xhs_get_notifications     获取通知列表（原始）
  * - xhs_get_notifications_pending 获取待处理通知（心跳专用）
  * - xhs_mark_notification     标记通知处理结果
  * - xhs_notification_stats    获取通知状态统计
@@ -58,7 +58,6 @@ import {
 import { postComment, replyComment, likeFeed, collectFeed } from "./src/actions/interact.js";
 import { checkLoginStatus, getLoginQrcode } from "./src/actions/login.js";
 import {
-  getNotifications,
   getNotificationsPending,
   markNotification,
   getNotificationsStats,
@@ -568,36 +567,6 @@ export default function register(api: OpenClawPluginApi) {
   // ============================================================================
   // 通知工具
   // ============================================================================
-
-  api.registerTool(
-    {
-      name: "xhs_get_notifications",
-      description: "获取小红书通知列表（评论、回复、@提及）。支持分页和时间过滤。",
-      parameters: Type.Object({
-        maxPages: Type.Optional(Type.Number({ description: "最大翻页数（默认 1）" })),
-        sinceTime: Type.Optional(
-          Type.Number({ description: "只返回此时间戳（Unix 毫秒）之后的通知" }),
-        ),
-        limit: Type.Optional(Type.Number({ description: "最大返回数量（默认 50）" })),
-      }),
-      async execute(_id: string, params: Record<string, unknown>) {
-        const result = await getNotifications(
-          {
-            maxPages: typeof params.maxPages === "number" ? params.maxPages : 1,
-            sinceTime: typeof params.sinceTime === "number" ? params.sinceTime : undefined,
-            limit: typeof params.limit === "number" ? params.limit : 50,
-          },
-          browserProfile,
-        );
-        const text = `获取到 ${result.notifications.length} 条通知${result.hasMore ? "（还有更多）" : ""}`;
-        return {
-          content: [{ type: "text" as const, text: `${text}\n${JSON.stringify(result, null, 2)}` }],
-          details: result,
-        };
-      },
-    },
-    { optional: true },
-  );
 
   api.registerTool(
     {

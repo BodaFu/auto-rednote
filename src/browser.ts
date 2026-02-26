@@ -162,10 +162,11 @@ export async function act(
   req: ActRequest,
   profile?: string,
 ): Promise<{ ok?: boolean; result?: unknown }> {
+  const timeoutMs = req.timeoutMs ?? 10000;
   return browserFetch(`/act${profileQuery(profile)}`, {
     method: "POST",
     body: req,
-    timeoutMs: 20000,
+    timeoutMs,
   });
 }
 
@@ -266,7 +267,7 @@ export async function getOrCreateXhsTab(profile?: string): Promise<string> {
 
   const tab = await openTab(XHS_HOME, profile);
   await waitForLoad(tab.targetId, 20000, profile);
-  await sleep(1500);
+  await sleep(500);
   await installNavigationGuard(tab.targetId, profile);
   return tab.targetId;
 }
@@ -284,7 +285,6 @@ export async function navigateWithWarmup(
 
   if (pageTabs.length > 0) {
     targetId = pageTabs[0]!.targetId;
-    // 关闭多余标签页，避免干扰
     for (let i = 1; i < pageTabs.length; i++) {
       await closeTab(pageTabs[i]!.targetId, profile).catch(() => null);
     }
@@ -295,6 +295,16 @@ export async function navigateWithWarmup(
 
   await navigate(targetId, url, profile).catch(() => null);
   await sleep(2000);
+
+  // 验证导航是否成功（URL 中应包含目标域名的关键路径）
+  const currentUrl = (await evaluate(targetId, "() => window.location.href", profile).catch(() => "")) as string;
+  const urlHost = new URL(url).hostname;
+  if (!currentUrl?.includes(urlHost)) {
+    // 重试一次
+    await navigate(targetId, url, profile).catch(() => null);
+    await sleep(2000);
+  }
+
   await installNavigationGuard(targetId, profile);
 
   return { targetId };

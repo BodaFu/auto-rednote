@@ -11,7 +11,6 @@ import {
   evaluate,
   extractInitialState,
   waitForInitialState,
-  waitForSelector,
   waitForResponseBody,
   act,
   sleep,
@@ -126,27 +125,6 @@ export type SearchFilters = {
   timeRange?: "all" | "day" | "week" | "half_year";
 };
 
-const SORT_INDEX_MAP: Record<string, number> = {
-  general: 1,
-  latest: 2,
-  most_liked: 3,
-  most_commented: 4,
-  most_collected: 5,
-};
-
-const NOTE_TYPE_INDEX_MAP: Record<string, number> = {
-  all: 1,
-  video: 2,
-  normal: 3,
-};
-
-const TIME_RANGE_INDEX_MAP: Record<string, number> = {
-  all: 1,
-  day: 2,
-  week: 3,
-  half_year: 4,
-};
-
 export async function searchFeeds(
   keyword: string,
   filters?: SearchFilters,
@@ -187,68 +165,6 @@ export async function searchFeeds(
   }
   if (!data) return [];
   return parseFeedList(data);
-}
-
-async function applySearchFilters(
-  targetId: string,
-  filters: SearchFilters,
-  profile?: string,
-): Promise<void> {
-  // 悬停筛选按钮展开面板
-  const filterRef = await findRefBySelector(targetId, "div.filter, [class*='filter-btn']", profile);
-  if (!filterRef) return;
-
-  await act({ kind: "hover", ref: filterRef, targetId }, profile);
-  await sleep(500);
-
-  try {
-    await waitForSelector(targetId, "div.filter-panel, [class*='filter-panel']", 3000, profile);
-  } catch {
-    return;
-  }
-
-  // 排序
-  if (filters.sortBy && filters.sortBy !== "general") {
-    const idx = SORT_INDEX_MAP[filters.sortBy] ?? 1;
-    await clickFilterOption(targetId, 1, idx, profile);
-    await sleep(500);
-  }
-
-  // 笔记类型
-  if (filters.noteType && filters.noteType !== "all") {
-    const idx = NOTE_TYPE_INDEX_MAP[filters.noteType] ?? 1;
-    await clickFilterOption(targetId, 2, idx, profile);
-    await sleep(500);
-  }
-
-  // 时间范围
-  if (filters.timeRange && filters.timeRange !== "all") {
-    const idx = TIME_RANGE_INDEX_MAP[filters.timeRange] ?? 1;
-    await clickFilterOption(targetId, 3, idx, profile);
-    await sleep(500);
-  }
-
-  // 等待结果更新
-  await sleep(1500);
-}
-
-async function clickFilterOption(
-  targetId: string,
-  filtersIndex: number,
-  tagsIndex: number,
-  profile?: string,
-): Promise<void> {
-  const fn = `() => {
-    const panels = document.querySelectorAll('div.filter-panel div.filters');
-    const panel = panels[${filtersIndex - 1}];
-    if (!panel) return false;
-    const tags = panel.querySelectorAll('div.tags');
-    const tag = tags[${tagsIndex - 1}];
-    if (!tag) return false;
-    tag.click();
-    return true;
-  }`;
-  await evaluate(targetId, fn, profile);
 }
 
 // ============================================================================
@@ -657,114 +573,31 @@ export async function getUserProfile(
 // ============================================================================
 
 export async function getMyProfile(profile?: string): Promise<XhsUserProfile | null> {
-  // 导航到首页，从 __INITIAL_STATE__ 中提取当前登录用户信息
   const { targetId } = await navigateWithWarmup(`${XHS_HOME}/explore`, profile);
 
-  const userInfo = await extractInitialState(targetId, "user.userInfo", profile);
+  // 从首页 __INITIAL_STATE__ 提取当前登录用户的 userId
+  const userId = await extractMyUserId(targetId, profile);
+  if (!userId) return null;
 
-  if (userInfo && typeof userInfo === "object") {
-    const info = userInfo as Record<string, unknown>;
-    const userId = String(info.userId ?? info.user_id ?? "");
-    if (userId) {
-      // 尝试直接从 __INITIAL_STATE__ 构建 profile
-      const basicInfo = info.basicInfo as Record<string, unknown> | undefined;
-      if (basicInfo) {
-        return {
-          basicInfo: {
-            userId,
-            nickname: String(basicInfo.nickname ?? ""),
-            avatar:
-              typeof basicInfo.imageb === "string"
-                ? basicInfo.imageb
-                : typeof basicInfo.images === "string"
-                  ? basicInfo.images
-                  : undefined,
-            redId: typeof basicInfo.redId === "string" ? basicInfo.redId : undefined,
-            desc: typeof basicInfo.desc === "string" ? basicInfo.desc : undefined,
-            gender: typeof basicInfo.gender === "number" ? basicInfo.gender : undefined,
-            ipLocation: typeof basicInfo.ipLocation === "string" ? basicInfo.ipLocation : undefined,
-          },
-        };
-      }
+  // 复用 getUserProfile 获取完整主页数据（无需 xsecToken）
+  return getUserProfile(userId, "", profile);
+}
 
-      // 否则通过 userId 获取完整 profile（无需 xsecToken）
-      const profileUrl = `${XHS_HOME}/user/profile/${userId}`;
-      const { targetId: profileTabId } = await navigateWithWarmup(profileUrl, profile);
-      const userPageData = await waitForInitialState(
-        profileTabId,
-        "user.userPageData",
-        10000,
-        profile,
-      );
-      if (userPageData && typeof userPageData === "object") {
-        const data = userPageData as Record<string, unknown>;
-        const bi = data.basicInfo as Record<string, unknown> | undefined;
-        const interactions = data.interactions as Array<Record<string, unknown>> | undefined;
-        return {
-          basicInfo: {
-            userId: String(bi?.userId ?? bi?.user_id ?? userId),
-            nickname: String(bi?.nickname ?? ""),
-            avatar:
-              typeof bi?.imageb === "string"
-                ? bi.imageb
-                : typeof bi?.images === "string"
-                  ? bi.images
-                  : undefined,
-            redId: typeof bi?.redId === "string" ? bi.redId : undefined,
-            desc: typeof bi?.desc === "string" ? bi.desc : undefined,
-            gender: typeof bi?.gender === "number" ? bi.gender : undefined,
-            ipLocation: typeof bi?.ipLocation === "string" ? bi.ipLocation : undefined,
-          },
-          interactions: Array.isArray(interactions)
-            ? interactions.map((i) => ({
-                type: String(i.type ?? ""),
-                name: String(i.name ?? ""),
-                count: String(i.count ?? ""),
-              }))
-            : undefined,
-        };
-      }
-    }
-  }
-
-  // 最后回退：从页面 DOM 提取登录用户信息
+async function extractMyUserId(targetId: string, profile?: string): Promise<string | null> {
   const raw = await evaluate(
     targetId,
     `() => {
-      const state = window.__INITIAL_STATE__
-      if (!state) return null
-      const user = state.user?.userInfo || state.userInfo || {}
-      return JSON.stringify({
-        userId: user.userId || user.user_id || '',
-        nickname: user.nickname || '',
-        avatar: user.imageb || user.images || '',
-        redId: user.redId || '',
-        desc: user.desc || '',
-      })
+      try {
+        const state = window.__INITIAL_STATE__;
+        if (!state) return null;
+        const user = state.user?.userInfo || state.userInfo || {};
+        const v = user._value || user.value || user;
+        return v.userId || v.user_id || null;
+      } catch { return null; }
     }`,
     profile,
   );
-
-  if (typeof raw === "string") {
-    try {
-      const parsed = JSON.parse(raw) as Record<string, string>;
-      if (parsed.userId) {
-        return {
-          basicInfo: {
-            userId: parsed.userId,
-            nickname: parsed.nickname,
-            avatar: parsed.avatar || undefined,
-            redId: parsed.redId || undefined,
-            desc: parsed.desc || undefined,
-          },
-        };
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  return null;
+  return typeof raw === "string" && raw ? raw : null;
 }
 
 // ============================================================================
@@ -772,15 +605,11 @@ export async function getMyProfile(profile?: string): Promise<XhsUserProfile | n
 // ============================================================================
 
 export async function getMyNotes(profile?: string): Promise<MyNote[]> {
-  // 先获取自己的 userId
   const myProfile = await getMyProfile(profile);
   if (!myProfile?.basicInfo?.userId) return [];
 
-  const userId = myProfile.basicInfo.userId;
-  const { targetId } = await navigateWithWarmup(`${XHS_HOME}/user/profile/${userId}`, profile);
-
-  // 等待用户主页数据加载（与 getUserProfile 保持一致）
-  await waitForInitialState(targetId, "user.userPageData", 10000, profile).catch(() => null);
+  // getMyProfile → getUserProfile 已导航到用户主页，复用已有 tab
+  const targetId = await getOrCreateXhsTab(profile);
   const notesData = await extractInitialState(targetId, "user.notes", profile);
 
   if (!Array.isArray(notesData)) return [];
@@ -1337,16 +1166,3 @@ async function scrollToParentComment(
   return finalCheck === true;
 }
 
-// ============================================================================
-// 内部辅助
-// ============================================================================
-
-async function findRefBySelector(
-  targetId: string,
-  selector: string,
-  profile?: string,
-): Promise<string | null> {
-  const snap = await snapshot(targetId, { format: "aria", selector, profile });
-  if (!snap.nodes?.length) return null;
-  return snap.nodes[0]?.ref ?? null;
-}

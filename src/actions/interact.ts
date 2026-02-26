@@ -5,7 +5,6 @@
 import {
   navigateWithWarmup,
   navigate,
-  getOrCreateXhsTab,
   closeTab,
   openTab,
   installNavigationGuard,
@@ -55,6 +54,55 @@ async function navigateToPost(
   if (freshLoaded) return { targetId: fresh.targetId };
 
   return null;
+}
+
+// ============================================================================
+// 公共：输入评论内容并提交
+// ============================================================================
+
+async function inputCommentAndSubmit(
+  targetId: string,
+  content: string,
+  profile?: string,
+): Promise<{ success: boolean; message: string }> {
+  // 输入内容：优先 execCommand，降级 ARIA
+  const typed = await evaluate(
+    targetId,
+    `() => {
+      const p = document.querySelector('div.input-box div.content-edit p.content-input');
+      if (!p) return false;
+      p.focus();
+      document.execCommand('insertText', false, ${JSON.stringify(content)});
+      return true;
+    }`,
+    profile,
+  ).catch(() => false);
+
+  if (!typed) {
+    const inputRef = await findCommentInput(targetId, profile);
+    if (!inputRef) return { success: false, message: "未找到评论输入区域" };
+    await act({ kind: "type", ref: inputRef, text: content, targetId }, profile);
+  }
+  await sleep(500);
+
+  // 提交
+  const submitted = await evaluate(
+    targetId,
+    `() => {
+      const btn = document.querySelector('div.bottom button.submit');
+      if (btn && !btn.disabled) { btn.click(); return true; }
+      return false;
+    }`,
+    profile,
+  ).catch(() => false);
+
+  if (!submitted) {
+    const ok = await clickSubmitButton(targetId, profile);
+    if (!ok) return { success: false, message: "未找到提交按钮" };
+  }
+
+  await sleep(1500);
+  return { success: true, message: "" };
 }
 
 // ============================================================================
@@ -150,7 +198,7 @@ export async function postComment(
   }
   await sleep(500);
 
-  // 步骤1：点击评论输入框的 span 触发激活（div.input-box div.content-edit span）
+  // 点击评论输入框的 span 触发激活
   const spanClicked = await evaluate(
     targetId,
     `() => {
@@ -165,62 +213,8 @@ export async function postComment(
   }
   await sleep(500);
 
-  // 步骤2：在激活后的 p.content-input 里输入内容（div.input-box div.content-edit p.content-input）
-  const inputClicked = await evaluate(
-    targetId,
-    `() => {
-      const p = document.querySelector('div.input-box div.content-edit p.content-input');
-      if (p) { p.focus(); return true; }
-      return false;
-    }`,
-    profile,
-  );
-
-  if (inputClicked) {
-    // 直接通过 evaluate 输入（模拟 rod 的 Input 方法）
-    const typed = await evaluate(
-      targetId,
-      `() => {
-        const p = document.querySelector('div.input-box div.content-edit p.content-input');
-        if (!p) return false;
-        p.focus();
-        document.execCommand('insertText', false, ${JSON.stringify(content)});
-        return true;
-      }`,
-      profile,
-    );
-    if (!typed) {
-      // 降级：通过 ARIA 快照找输入框
-      const inputRef = await findCommentInput(targetId, profile);
-      if (!inputRef) return { success: false, message: "未找到评论输入区域" };
-      await act({ kind: "type", ref: inputRef, text: content, targetId }, profile);
-    }
-  } else {
-    // 降级：通过 ARIA 快照找输入框
-    const inputRef = await findCommentInput(targetId, profile);
-    if (!inputRef) return { success: false, message: "未找到评论输入区域" };
-    await act({ kind: "type", ref: inputRef, text: content, targetId }, profile);
-  }
-  await sleep(500);
-
-  // 步骤3：点击提交按钮（div.bottom button.submit）
-  const submitted = await evaluate(
-    targetId,
-    `() => {
-      const btn = document.querySelector('div.bottom button.submit');
-      if (btn && !btn.disabled) { btn.click(); return true; }
-      return false;
-    }`,
-    profile,
-  );
-  if (!submitted) {
-    // 降级到 ARIA 快照
-    const ok = await clickSubmitButton(targetId, profile);
-    if (!ok) return { success: false, message: "未找到提交按钮" };
-  }
-
-  await sleep(1500);
-  return { success: true, message: "评论发表成功" };
+  const result = await inputCommentAndSubmit(targetId, content, profile);
+  return { success: result.success, message: result.success ? "评论发表成功" : result.message };
 }
 
 // ============================================================================
@@ -235,22 +229,22 @@ export async function replyComment(
   parentCommentId?: string,
   profile?: string,
 ): Promise<{ success: boolean; message: string }> {
-  // replyTargetId 是最终用于点击回复按钮的评论 ID，可能在容错降级时被替换为 parentCommentId
   let replyTargetId = commentId;
   const url = `${XHS_HOME}/explore/${feedId}?xsec_token=${encodeURIComponent(xsecToken)}&xsec_source=pc_feed`;
-  const targetId = await getOrCreateXhsTab(profile);
 
-  // 在导航前注入 fetch 拦截器，持续收集评论 API 响应。
-  // 拦截器将所有 /api/sns/web/v2/comment/page 响应追加到 window.__commentAPIEntries，
-  // 后续 scrollToComment 每轮都会读取最新数据，实现多批次 API 检查。
+  const nav = await navigateToPost(feedId, url, profile);
+  if (!nav) {
+    return { success: false, message: "页面加载超时，多次尝试均未能打开帖子" };
+  }
+  const targetId = nav.targetId;
+
+  // 页面已加载后注入 fetch 拦截器，持续收集评论 API 响应。
+  // 注意：必须在 navigateToPost 之后注入，因为 navigate 会重置 JS 上下文。
   await injectCommentAPIInterceptor(targetId, profile);
 
-  await navigate(targetId, url, profile).catch(() => null);
-  await sleep(2000);
-
-  // 等待评论区加载（最多 15 秒）
+  // 等待评论区加载（最多 10 秒，navigateToPost 已确认页面数据就绪）
   let commentAreaReady = false;
-  for (let i = 0; i < 15; i++) {
+  for (let i = 0; i < 10; i++) {
     const found = await evaluate(
       targetId,
       `() => document.querySelector('#noteContainer, .note-container, .note-scroller, .comments-container') ? 1 : 0`,
@@ -348,76 +342,19 @@ export async function replyComment(
   }
   await sleep(800);
 
-  // 等待回复输入框出现（点击回复按钮后需要等待输入框渲染）
-  let inputReady = false;
+  // 等待回复输入框出现
   for (let i = 0; i < 5; i++) {
     const has = await evaluate(
       targetId,
       `() => document.querySelector('div.input-box div.content-edit p.content-input') ? 1 : 0`,
       profile,
     ).catch(() => 0);
-    if (has === 1) {
-      inputReady = true;
-      break;
-    }
+    if (has === 1) break;
     await sleep(500);
   }
 
-  if (!inputReady) {
-    // 降级：通过 ARIA 快照找输入框
-    const inputRef = await findCommentInput(targetId, profile);
-    if (!inputRef) {
-      return {
-        success: false,
-        message: "未找到回复输入框（div.input-box div.content-edit p.content-input）",
-      };
-    }
-    await act({ kind: "type", ref: inputRef, text: content, targetId }, profile);
-  } else {
-    // 输入回复内容
-    const typed = await evaluate(
-      targetId,
-      `() => {
-        const p = document.querySelector('div.input-box div.content-edit p.content-input');
-        if (!p) return false;
-        p.focus();
-        document.execCommand('insertText', false, ${JSON.stringify(content)});
-        return true;
-      }`,
-      profile,
-    ).catch(() => false);
-
-    if (!typed) {
-      const inputRef = await findCommentInput(targetId, profile);
-      if (!inputRef) {
-        return {
-          success: false,
-          message: "未找到回复输入框（div.input-box div.content-edit p.content-input）",
-        };
-      }
-      await act({ kind: "type", ref: inputRef, text: content, targetId }, profile);
-    }
-  }
-  await sleep(500);
-
-  // 提交（div.bottom button.submit）
-  const submitted = await evaluate(
-    targetId,
-    `() => {
-      const btn = document.querySelector('div.bottom button.submit');
-      if (btn && !btn.disabled) { btn.click(); return true; }
-      return false;
-    }`,
-    profile,
-  ).catch(() => false);
-
-  if (!submitted) {
-    const ok = await clickSubmitButton(targetId, profile);
-    if (!ok) return { success: false, message: "未找到提交按钮" };
-  }
-
-  await sleep(1500);
-  return { success: true, message: "回复发表成功" };
+  const result = await inputCommentAndSubmit(targetId, content, profile);
+  return { success: result.success, message: result.success ? "回复发表成功" : result.message };
 }
 
 // ============================================================================
@@ -430,62 +367,8 @@ export async function likeFeed(
   unlike = false,
   profile?: string,
 ): Promise<{ success: boolean; liked: boolean; message: string }> {
-  const url = `${XHS_HOME}/explore/${feedId}?xsec_token=${encodeURIComponent(xsecToken)}&xsec_source=pc_feed`;
-  const nav = await navigateToPost(feedId, url, profile);
-  if (!nav) {
-    return { success: false, liked: false, message: "页面加载超时，未能打开帖子" };
-  }
-  const targetId = nav.targetId;
-  await sleep(500);
-
-  // 读取当前点赞状态
-  const currentLiked = await getLikeStatus(targetId, feedId, profile);
-
-  // 如果状态已经符合预期，直接返回
-  if (currentLiked === true && !unlike) {
-    return { success: true, liked: true, message: "已经是点赞状态" };
-  }
-  if (currentLiked === false && unlike) {
-    return { success: true, liked: false, message: "已经是未点赞状态" };
-  }
-
-  // 点击点赞按钮
-  const clicked = await evaluate(
-    targetId,
-    `() => {
-      const btn = document.querySelector('.interact-container .left .like-lottie, .like-wrapper .like-btn, [class*="like-btn"]');
-      if (btn) {
-        if (typeof btn.click === 'function') btn.click();
-        else btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-        return true;
-      }
-      return false;
-    }`,
-    profile,
-  );
-
-  if (!clicked) {
-    // 通过 ARIA 快照查找
-    const snap = await snapshot(targetId, { format: "aria", profile });
-    const likeRef = snap.nodes?.find(
-      (n) => n.role === "button" && (n.name.includes("点赞") || n.name.includes("赞")),
-    )?.ref;
-    if (!likeRef) {
-      return { success: false, liked: currentLiked ?? false, message: "未找到点赞按钮" };
-    }
-    await act({ kind: "click", ref: likeRef, targetId }, profile);
-  }
-
-  await sleep(1500);
-
-  // 验证状态变化
-  const newLiked = await getLikeStatus(targetId, feedId, profile);
-  const expectedLiked = !unlike;
-  return {
-    success: newLiked === expectedLiked,
-    liked: newLiked ?? expectedLiked,
-    message: newLiked === expectedLiked ? (unlike ? "取消点赞成功" : "点赞成功") : "操作可能未生效",
-  };
+  const r = await toggleInteraction(feedId, xsecToken, "like", unlike, profile);
+  return { success: r.success, liked: r.active, message: r.message };
 }
 
 // ============================================================================
@@ -498,27 +381,63 @@ export async function collectFeed(
   uncollect = false,
   profile?: string,
 ): Promise<{ success: boolean; collected: boolean; message: string }> {
+  const r = await toggleInteraction(feedId, xsecToken, "collect", uncollect, profile);
+  return { success: r.success, collected: r.active, message: r.message };
+}
+
+// ============================================================================
+// 公共：点赞/收藏 toggle
+// ============================================================================
+
+const INTERACTION_CONFIG = {
+  like: {
+    domSelector: '.interact-container .left .like-lottie, .like-wrapper .like-btn, [class*="like-btn"]',
+    ariaKeywords: ["点赞", "赞"],
+    stateField: "liked" as const,
+    activeLabel: "点赞",
+    inactiveLabel: "取消点赞",
+  },
+  collect: {
+    domSelector: '.interact-container .left .reds-icon.collect-icon, .collect-wrapper .collect-btn, [class*="collect-btn"]',
+    ariaKeywords: ["收藏", "bookmark"],
+    stateField: "collected" as const,
+    activeLabel: "收藏",
+    inactiveLabel: "取消收藏",
+  },
+} as const;
+
+async function toggleInteraction(
+  feedId: string,
+  xsecToken: string,
+  type: "like" | "collect",
+  undo: boolean,
+  profile?: string,
+): Promise<{ success: boolean; active: boolean; message: string }> {
+  const config = INTERACTION_CONFIG[type];
   const url = `${XHS_HOME}/explore/${feedId}?xsec_token=${encodeURIComponent(xsecToken)}&xsec_source=pc_feed`;
   const nav = await navigateToPost(feedId, url, profile);
   if (!nav) {
-    return { success: false, collected: false, message: "页面加载超时，未能打开帖子" };
+    return { success: false, active: false, message: "页面加载超时，未能打开帖子" };
   }
   const targetId = nav.targetId;
   await sleep(500);
 
-  const currentCollected = await getCollectStatus(targetId, feedId, profile);
+  const getStatus = config.stateField === "liked"
+    ? () => getLikeStatus(targetId, feedId, profile)
+    : () => getCollectStatus(targetId, feedId, profile);
 
-  if (currentCollected === true && !uncollect) {
-    return { success: true, collected: true, message: "已经是收藏状态" };
+  const current = await getStatus();
+  if (current === true && !undo) {
+    return { success: true, active: true, message: `已经是${config.activeLabel}状态` };
   }
-  if (currentCollected === false && uncollect) {
-    return { success: true, collected: false, message: "已经是未收藏状态" };
+  if (current === false && undo) {
+    return { success: true, active: false, message: `已经是未${config.activeLabel}状态` };
   }
 
   const clicked = await evaluate(
     targetId,
     `() => {
-      const btn = document.querySelector('.interact-container .left .reds-icon.collect-icon, .collect-wrapper .collect-btn, [class*="collect-btn"]');
+      const btn = document.querySelector('${config.domSelector}');
       if (btn) {
         if (typeof btn.click === 'function') btn.click();
         else btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
@@ -531,28 +450,25 @@ export async function collectFeed(
 
   if (!clicked) {
     const snap = await snapshot(targetId, { format: "aria", profile });
-    const collectRef = snap.nodes?.find(
-      (n) => n.role === "button" && (n.name.includes("收藏") || n.name.includes("bookmark")),
+    const ref = snap.nodes?.find(
+      (n) => n.role === "button" && config.ariaKeywords.some((kw) => n.name.includes(kw)),
     )?.ref;
-    if (!collectRef) {
-      return { success: false, collected: currentCollected ?? false, message: "未找到收藏按钮" };
+    if (!ref) {
+      return { success: false, active: current ?? false, message: `未找到${config.activeLabel}按钮` };
     }
-    await act({ kind: "click", ref: collectRef, targetId }, profile);
+    await act({ kind: "click", ref, targetId }, profile);
   }
 
   await sleep(1500);
 
-  const newCollected = await getCollectStatus(targetId, feedId, profile);
-  const expectedCollected = !uncollect;
+  const newStatus = await getStatus();
+  const expected = !undo;
   return {
-    success: newCollected === expectedCollected,
-    collected: newCollected ?? expectedCollected,
-    message:
-      newCollected === expectedCollected
-        ? uncollect
-          ? "取消收藏成功"
-          : "收藏成功"
-        : "操作可能未生效",
+    success: newStatus === expected,
+    active: newStatus ?? expected,
+    message: newStatus === expected
+      ? (undo ? `${config.inactiveLabel}成功` : `${config.activeLabel}成功`)
+      : "操作可能未生效",
   };
 }
 
@@ -810,7 +726,7 @@ async function scrollToComment(
   commentId: string,
   profile?: string,
 ): Promise<boolean> {
-  const maxScrollRounds = 200;
+  const maxScrollRounds = 50;
 
   // 先滚动到评论区
   await evaluate(
