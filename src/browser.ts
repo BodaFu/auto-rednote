@@ -115,11 +115,21 @@ export async function navigate(
   url: string,
   profile?: string,
 ): Promise<{ targetId: string; url: string }> {
-  return browserFetch(`/navigate${profileQuery(profile)}`, {
-    method: "POST",
-    body: { url, targetId },
-    timeoutMs: 20000,
-  });
+  assertNotInCooldown();
+  const result = await browserFetch<{ targetId: string; url: string }>(
+    `/navigate${profileQuery(profile)}`,
+    { method: "POST", body: { url, targetId }, timeoutMs: 20000 },
+  );
+  if (isRateLimitUrl(result.url)) {
+    activateCooldown();
+    await browserFetch(`/navigate${profileQuery(profile)}`, {
+      method: "POST",
+      body: { url: XHS_HOME, targetId },
+      timeoutMs: 10000,
+    }).catch(() => null);
+    throw new RateLimitError(DEFAULT_COOLDOWN_MS);
+  }
+  return result;
 }
 
 export type ActRequest =
@@ -220,6 +230,71 @@ export async function sleep(ms: number): Promise<void> {
 }
 
 // ============================================================================
+// 人类行为模拟工具
+// ============================================================================
+
+/**
+ * 生成随机延迟时间（毫秒）
+ * @param min 最小值（默认 3000ms）
+ * @param max 最大值（默认 8000ms）
+ */
+export function randomDelay(min = 3000, max = 8000): number {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+/**
+ * 在小红书帖子详情页的正确滚动容器上派发 WheelEvent，触发评论懒加载。
+ * 小红书的评论区在 .note-scroller 或 .interaction-container 内部滚动，
+ * window.scrollBy 无法触发其 IntersectionObserver / scroll 事件。
+ * 
+ * @param deltaY 滚动像素量，正值向下
+ */
+export async function smartScroll(
+  targetId: string,
+  deltaY?: number,
+  profile?: string,
+): Promise<void> {
+  const dy = deltaY ?? 600;
+  await evaluate(
+    targetId,
+    `() => {
+      const containers = ['.note-scroller', '.interaction-container', '#noteContainer'];
+      let scrolled = false;
+      for (const sel of containers) {
+        const el = document.querySelector(sel);
+        if (el && el.scrollHeight > el.clientHeight) {
+          el.dispatchEvent(new WheelEvent('wheel', {
+            deltaY: ${dy}, bubbles: true, cancelable: true
+          }));
+          el.scrollBy({ top: ${dy}, behavior: 'smooth' });
+          scrolled = true;
+          break;
+        }
+      }
+      if (!scrolled) {
+        window.scrollBy(0, ${dy});
+      }
+    }`,
+    profile,
+  ).catch(() => {});
+}
+
+/**
+ * 模拟人类打开页面后的热身行为（滚动、停顿）
+ */
+export async function humanWarmup(
+  targetId: string,
+  profile?: string,
+): Promise<void> {
+  const scrollCount = Math.floor(Math.random() * 2) + 1;
+  for (let i = 0; i < scrollCount; i++) {
+    const dy = Math.floor(Math.random() * 300 + 100);
+    await smartScroll(targetId, dy, profile);
+    await sleep(randomDelay(500, 1500));
+  }
+}
+
+// ============================================================================
 // 导航保护：防止 xiaohongshu SPA 自动跳转到非 creator 页面
 //
 // creator.xiaohongshu.com 页面有前端脚本会自动导航到
@@ -259,7 +334,23 @@ export async function installNavigationGuard(targetId: string, profile?: string)
 // ============================================================================
 
 export async function getOrCreateXhsTab(profile?: string): Promise<string> {
+  assertNotInCooldown();
   const tabs = await getTabs(profile);
+
+  // 检查是否有 tab 停留在频率限制页面
+  const limitedTab = tabs.find(
+    (t) => t.type === "page" && isRateLimitUrl(t.url),
+  );
+  if (limitedTab) {
+    activateCooldown();
+    await browserFetch(`/navigate${profileQuery(profile)}`, {
+      method: "POST",
+      body: { url: XHS_HOME, targetId: limitedTab.targetId },
+      timeoutMs: 10000,
+    }).catch(() => null);
+    throw new RateLimitError(DEFAULT_COOLDOWN_MS);
+  }
+
   const existing = tabs.find(
     (t) => t.url.includes("xiaohongshu.com") && t.type !== "background_page" && t.type !== "service_worker",
   );
@@ -276,10 +367,32 @@ export async function navigateWithWarmup(
   url: string,
   profile?: string,
 ): Promise<{ targetId: string }> {
+  assertNotInCooldown();
   const tabs = await getTabs(profile);
+
+  // 检查是否有 tab 停留在频率限制页面
+  const limitedTab = tabs.find(
+    (t) => t.type === "page" && isRateLimitUrl(t.url),
+  );
+  if (limitedTab) {
+    activateCooldown();
+    await browserFetch(`/navigate${profileQuery(profile)}`, {
+      method: "POST",
+      body: { url: XHS_HOME, targetId: limitedTab.targetId },
+      timeoutMs: 10000,
+    }).catch(() => null);
+    throw new RateLimitError(DEFAULT_COOLDOWN_MS);
+  }
+
   const pageTabs = tabs.filter(
     (t) => t.url.includes("xiaohongshu.com") && t.type !== "background_page" && t.type !== "service_worker",
   );
+
+  // 清理孤儿 about:blank tab，防止长期运行后内存泄漏
+  const blankTabs = tabs.filter((t) => t.url === "about:blank" && t.type === "page");
+  for (const bt of blankTabs) {
+    await closeTab(bt.targetId, profile).catch(() => null);
+  }
 
   let targetId: string;
 
@@ -293,18 +406,33 @@ export async function navigateWithWarmup(
     targetId = tab.targetId;
   }
 
-  await navigate(targetId, url, profile).catch(() => null);
-  await sleep(2000);
+  // navigate 内部已包含频率限制检测，RateLimitError 会直接抛出
+  await navigate(targetId, url, profile).catch((err) => {
+    if (isRateLimitError(err)) throw err;
+  });
+  await sleep(randomDelay(2000, 4000));
 
-  // 验证导航是否成功（URL 中应包含目标域名的关键路径）
+  // 导航后再次检查（某些限制是异步跳转的）
   const currentUrl = (await evaluate(targetId, "() => window.location.href", profile).catch(() => "")) as string;
-  const urlHost = new URL(url).hostname;
-  if (!currentUrl?.includes(urlHost)) {
-    // 重试一次
-    await navigate(targetId, url, profile).catch(() => null);
-    await sleep(2000);
+  if (isRateLimitUrl(currentUrl)) {
+    activateCooldown();
+    await browserFetch(`/navigate${profileQuery(profile)}`, {
+      method: "POST",
+      body: { url: XHS_HOME, targetId },
+      timeoutMs: 10000,
+    }).catch(() => null);
+    throw new RateLimitError(DEFAULT_COOLDOWN_MS);
   }
 
+  const urlHost = new URL(url).hostname;
+  if (!currentUrl?.includes(urlHost)) {
+    await navigate(targetId, url, profile).catch((err) => {
+      if (isRateLimitError(err)) throw err;
+    });
+    await sleep(randomDelay(2000, 4000));
+  }
+
+  await humanWarmup(targetId, profile).catch(() => {});
   await installNavigationGuard(targetId, profile);
 
   return { targetId };
@@ -497,5 +625,97 @@ export async function isTabAlive(targetId: string, profile?: string): Promise<bo
     return tabs.some((t) => t.targetId === targetId);
   } catch {
     return false;
+  }
+}
+
+// ============================================================================
+// 频率限制检测 & 冷却机制
+//
+// 小红书在访问过于频繁时会将页面重定向到两种限制页面：
+// 1. /website-login/error?...error_code=300013  → "安全限制：访问频繁"
+// 2. /404?source=/404/sec_...&error_code=300031 → "当前笔记暂时无法浏览"
+//
+// 检测到后进入冷却期（默认 10 分钟），期间所有小红书操作直接拒绝。
+// ============================================================================
+
+const DEFAULT_COOLDOWN_MS = 10 * 60 * 1000;
+
+let rateLimitCooldownUntil = 0;
+
+export class RateLimitError extends Error {
+  public readonly cooldownUntil: number;
+  public readonly remainingMs: number;
+
+  constructor(remainingMs: number) {
+    const minutes = Math.ceil(remainingMs / 60_000);
+    super(`小红书访问频率限制中，请 ${minutes} 分钟后再试`);
+    this.name = "RateLimitError";
+    this.cooldownUntil = Date.now() + remainingMs;
+    this.remainingMs = remainingMs;
+  }
+}
+
+export function isRateLimitError(err: unknown): err is RateLimitError {
+  return err instanceof RateLimitError;
+}
+
+/**
+ * 检查 URL 是否为小红书频率限制页面。
+ */
+function isRateLimitUrl(url: string): boolean {
+  if (!url) return false;
+  return (
+    (url.includes("/website-login/error") && url.includes("300013")) ||
+    (url.includes("/404") && url.includes("/sec_") && url.includes("300031"))
+  );
+}
+
+/**
+ * 触发冷却期。导航回首页以恢复正常状态。
+ */
+function activateCooldown(cooldownMs = DEFAULT_COOLDOWN_MS): void {
+  rateLimitCooldownUntil = Date.now() + cooldownMs;
+}
+
+/**
+ * 检查是否处于冷却期。如果是，抛出 RateLimitError。
+ * 所有小红书操作入口应在执行前调用此函数。
+ */
+export function assertNotInCooldown(): void {
+  const remaining = rateLimitCooldownUntil - Date.now();
+  if (remaining > 0) {
+    throw new RateLimitError(remaining);
+  }
+}
+
+/**
+ * 检测当前页面是否为频率限制页面。
+ * 如果是，激活冷却期并尝试导航回首页。
+ */
+export async function checkRateLimit(targetId: string, profile?: string): Promise<void> {
+  const currentUrl = await evaluate(targetId, "() => window.location.href", profile)
+    .catch(() => "") as string;
+
+  if (isRateLimitUrl(currentUrl)) {
+    activateCooldown();
+    // 尝试导航回首页，避免下次操作时仍停留在限制页面
+    await navigate(targetId, XHS_HOME, profile).catch(() => null);
+    throw new RateLimitError(DEFAULT_COOLDOWN_MS);
+  }
+}
+
+/**
+ * 检查 tabs 列表中是否有处于频率限制页面的 tab。
+ * 用于 getOrCreateXhsTab / navigateWithWarmup 等获取 tab 时的早期检测。
+ */
+export async function checkTabsForRateLimit(profile?: string): Promise<void> {
+  const tabs = await getTabs(profile);
+  const limitedTab = tabs.find(
+    (t) => t.type === "page" && isRateLimitUrl(t.url),
+  );
+  if (limitedTab) {
+    activateCooldown();
+    await navigate(limitedTab.targetId, XHS_HOME, profile).catch(() => null);
+    throw new RateLimitError(DEFAULT_COOLDOWN_MS);
   }
 }

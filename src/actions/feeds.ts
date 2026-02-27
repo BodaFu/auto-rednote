@@ -15,6 +15,7 @@ import {
   act,
   sleep,
   snapshot,
+  smartScroll,
 } from "../browser.js";
 import type {
   XhsFeed,
@@ -123,48 +124,218 @@ export type SearchFilters = {
   sortBy?: "general" | "latest" | "most_liked" | "most_commented" | "most_collected";
   noteType?: "all" | "video" | "normal";
   timeRange?: "all" | "day" | "week" | "half_year";
+  searchScope?: "all" | "viewed" | "not_viewed" | "following";
 };
+
+/**
+ * 筛选面板 DOM 索引映射。
+ * 小红书搜索页的筛选面板结构：
+ *   div.filter-panel > div.filters:nth-child(N) > div.tags:nth-child(M)
+ * 其中 N = filtersIndex（筛选组），M = tagsIndex（选项）
+ */
+const FILTER_MAP: Record<string, Record<string, { filtersIndex: number; tagsIndex: number }>> = {
+  sortBy: {
+    general:        { filtersIndex: 1, tagsIndex: 1 },
+    latest:         { filtersIndex: 1, tagsIndex: 2 },
+    most_liked:     { filtersIndex: 1, tagsIndex: 3 },
+    most_commented: { filtersIndex: 1, tagsIndex: 4 },
+    most_collected: { filtersIndex: 1, tagsIndex: 5 },
+  },
+  noteType: {
+    all:    { filtersIndex: 2, tagsIndex: 1 },
+    video:  { filtersIndex: 2, tagsIndex: 2 },
+    normal: { filtersIndex: 2, tagsIndex: 3 },
+  },
+  timeRange: {
+    all:       { filtersIndex: 3, tagsIndex: 1 },
+    day:       { filtersIndex: 3, tagsIndex: 2 },
+    week:      { filtersIndex: 3, tagsIndex: 3 },
+    half_year: { filtersIndex: 3, tagsIndex: 4 },
+  },
+  searchScope: {
+    all:         { filtersIndex: 4, tagsIndex: 1 },
+    viewed:      { filtersIndex: 4, tagsIndex: 2 },
+    not_viewed:  { filtersIndex: 4, tagsIndex: 3 },
+    following:   { filtersIndex: 4, tagsIndex: 4 },
+  },
+};
+
+function buildFilterClicks(filters: SearchFilters): Array<{ filtersIndex: number; tagsIndex: number }> {
+  const clicks: Array<{ filtersIndex: number; tagsIndex: number }> = [];
+  for (const [key, value] of Object.entries(filters)) {
+    if (!value) continue;
+    const group = FILTER_MAP[key];
+    if (!group) continue;
+    const mapping = group[value];
+    if (!mapping) continue;
+    // 跳过默认值（综合/不限），无需点击
+    if (mapping.tagsIndex === 1) continue;
+    clicks.push(mapping);
+  }
+  return clicks;
+}
+
+/**
+ * 在搜索页应用筛选条件：hover 筛选按钮 → 等待面板 → 点击选项 → 等待结果刷新。
+ * 参考 Go 版本 xiaohongshu-mcp 的 search.go 实现。
+ */
+async function applySearchFilters(
+  targetId: string,
+  clicks: Array<{ filtersIndex: number; tagsIndex: number }>,
+  profile?: string,
+): Promise<void> {
+  // hover div.filter 触发筛选面板展开
+  await evaluate(
+    targetId,
+    `() => {
+      const btn = document.querySelector('div.filter');
+      if (btn) {
+        btn.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+        btn.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      }
+    }`,
+    profile,
+  );
+  await sleep(800);
+
+  // 等待筛选面板出现
+  await evaluate(
+    targetId,
+    `() => new Promise((resolve, reject) => {
+      const start = Date.now();
+      const check = () => {
+        if (document.querySelector('div.filter-panel')) return resolve(true);
+        if (Date.now() - start > 5000) return reject(new Error('filter-panel not found'));
+        setTimeout(check, 200);
+      };
+      check();
+    })`,
+    profile,
+  ).catch(() => null);
+
+  // 依次点击各筛选选项
+  for (const { filtersIndex, tagsIndex } of clicks) {
+    const selector = `div.filter-panel div.filters:nth-child(${filtersIndex}) div.tags:nth-child(${tagsIndex})`;
+    await evaluate(
+      targetId,
+      `() => {
+        const el = document.querySelector(${JSON.stringify(selector)});
+        if (el) el.click();
+      }`,
+      profile,
+    );
+    await sleep(300);
+  }
+
+  // 点击完后移开鼠标，让面板收起
+  await evaluate(
+    targetId,
+    `() => {
+      const btn = document.querySelector('div.filter');
+      if (btn) {
+        btn.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }));
+        btn.dispatchEvent(new MouseEvent('mouseout', { bubbles: true }));
+      }
+    }`,
+    profile,
+  );
+
+  // 等待搜索结果刷新
+  await sleep(2000);
+}
 
 export async function searchFeeds(
   keyword: string,
   filters?: SearchFilters,
   profile?: string,
 ): Promise<XhsFeed[]> {
-  // 复用已有 tab，用 JS 导航并拦截搜索 API 响应（避免等待 load 事件超时）
   const targetId = await getOrCreateXhsTab(profile);
   const url = `${XHS_HOME}/search_result?keyword=${encodeURIComponent(keyword)}&source=web_explore_feed`;
 
-  // 先启动响应拦截，再触发导航
-  const responsePromise = waitForResponseBody(
-    targetId,
-    "*/api/sns/web/v1/search/notes*",
-    15000,
-    profile,
-  ).catch(() => null);
-
-  await evaluate(targetId, `() => { window.location.href = ${JSON.stringify(url)}; }`, profile);
-
-  const apiResponse = await responsePromise;
-  if (apiResponse?.body) {
-    try {
-      const parsed = JSON.parse(apiResponse.body) as Record<string, unknown>;
-      const items = (parsed.data as Record<string, unknown>)?.items;
-      if (Array.isArray(items)) {
-        return parseFeedList(items);
-      }
-    } catch {
-      // 降级到 state 提取
-    }
-  }
-
-  // 降级：从 __INITIAL_STATE__ 提取
+  await navigate(targetId, url, profile).catch(() => null);
   await sleep(3000);
-  let data = await extractInitialState(targetId, "search.feeds", profile);
-  if (!data) {
-    data = await extractInitialState(targetId, "search.noteList", profile);
+
+  // 应用筛选条件（如果有非默认值的筛选项）
+  const filterClicks = filters ? buildFilterClicks(filters) : [];
+  if (filterClicks.length > 0) {
+    await applySearchFilters(targetId, filterClicks, profile);
   }
-  if (!data) return [];
-  return parseFeedList(data);
+
+  // 策略 1：等待 __INITIAL_STATE__.search.feeds 有数据（最多 15 秒）
+  for (let i = 0; i < 6; i++) {
+    const data = await extractInitialState(targetId, "search.feeds", profile);
+    if (Array.isArray(data) && data.length > 0) return parseFeedList(data);
+    await sleep(2000);
+  }
+
+  // 策略 2：直接在页面上下文中读取 reactive proxy 的原始值
+  const rawFeeds = await evaluate(
+    targetId,
+    `() => {
+      try {
+        const state = window.__INITIAL_STATE__;
+        if (!state?.search?.feeds) return null;
+        const feeds = state.search.feeds;
+        const data = feeds._rawValue ?? feeds._value ?? feeds.value ?? feeds;
+        if (!Array.isArray(data) || data.length === 0) return null;
+        return JSON.stringify(data.map(f => ({
+          id: f.id ?? f.noteId ?? '',
+          xsecToken: f.xsecToken ?? f.xsec_token ?? '',
+          modelType: f.modelType,
+          noteCard: f.noteCard ?? f.note_card ?? null,
+        })));
+      } catch { return null; }
+    }`,
+    profile,
+  );
+  if (typeof rawFeeds === "string" && rawFeeds) {
+    try {
+      const parsed = JSON.parse(rawFeeds) as unknown[];
+      if (parsed.length > 0) return parseFeedList(parsed);
+    } catch {}
+  }
+
+  // 策略 3：API 拦截（注入 fetch hook 后触发搜索请求）
+  await evaluate(
+    targetId,
+    `() => {
+      if (window.__searchInterceptorInstalled) return;
+      window.__searchInterceptorInstalled = true;
+      window.__searchAPIResult = null;
+      const origFetch = window.fetch;
+      window.fetch = async function(...args) {
+        const response = await origFetch.apply(this, args);
+        const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url ?? '');
+        if (url.includes('/api/sns/web/v1/search/notes')) {
+          const clone = response.clone();
+          clone.text().then(body => {
+            try { window.__searchAPIResult = body; } catch {}
+          }).catch(() => {});
+        }
+        return response;
+      };
+    }`,
+    profile,
+  );
+
+  // 触发重新搜索（滚动或刷新搜索）
+  await evaluate(targetId, `() => { window.scrollBy(0, 100); }`, profile);
+  await sleep(3000);
+
+  const apiResult = await evaluate(
+    targetId,
+    `() => window.__searchAPIResult`,
+    profile,
+  );
+  if (typeof apiResult === "string" && apiResult) {
+    try {
+      const parsed = JSON.parse(apiResult) as Record<string, unknown>;
+      const items = (parsed.data as Record<string, unknown>)?.items;
+      if (Array.isArray(items) && items.length > 0) return parseFeedList(items);
+    } catch {}
+  }
+
+  return [];
 }
 
 // ============================================================================
@@ -188,6 +359,7 @@ export async function getFeed(
   let targetId = await getOrCreateXhsTab(profile);
   let noteDetailMap: unknown = null;
   let commentApiPromise: Promise<{ url: string; status?: number; body: string } | null> | null = null;
+  let freshTabOpened = false;
 
   for (let attempt = 0; attempt < 3; attempt++) {
     if (attempt === 2) {
@@ -195,6 +367,7 @@ export async function getFeed(
       await closeTab(targetId, profile).catch(() => null);
       const fresh = await openTab(url, profile);
       targetId = fresh.targetId;
+      freshTabOpened = true;
       await sleep(3000);
     } else {
       // 第 0/1 次：复用现有标签页，发起/重发导航
@@ -217,6 +390,10 @@ export async function getFeed(
   }
 
   if (!noteDetailMap || typeof noteDetailMap !== "object") {
+    // 新 tab 加载失败，关闭防止泄漏
+    if (freshTabOpened) {
+      await closeTab(targetId, profile).catch(() => null);
+    }
     return null;
   }
 
@@ -357,7 +534,7 @@ async function loadComments(
   await evaluate(
     targetId,
     `() => {
-      const el = document.querySelector('.comments-container, #comments');
+      const el = document.querySelector('.comments-container, .interaction-container, #noteContainer');
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }`,
     profile,
@@ -367,7 +544,7 @@ async function loadComments(
   // 检查是否有评论
   const noComments = await evaluate(
     targetId,
-    `() => !!document.querySelector('.no-comments-text, [class*="no-comment"]')`,
+    `() => !!document.querySelector('[class*="no-comment"]')`,
     profile,
   );
   if (noComments === true) {
@@ -398,8 +575,7 @@ async function loadComments(
     if (count === prevCount) {
       stagnantRounds++;
       if (stagnantRounds >= 3) break;
-      // 大幅滚动尝试触发懒加载
-      await evaluate(targetId, `() => window.scrollBy(0, window.innerHeight * 2)`, profile);
+      await smartScroll(targetId, 1200, profile);
     } else {
       stagnantRounds = 0;
     }
@@ -411,10 +587,10 @@ async function loadComments(
         const comments = document.querySelectorAll('.parent-comment');
         const last = comments[comments.length - 1];
         if (last) last.scrollIntoView({ behavior: 'smooth', block: 'end' });
-        else window.scrollBy(0, window.innerHeight);
       }`,
       profile,
     );
+    await smartScroll(targetId, 600, profile);
     await sleep(600);
     page++;
   }
@@ -453,21 +629,25 @@ async function extractVisibleComments(
   const raw = await evaluate(
     targetId,
     `() => {
-      // el.id 格式为 "comment-{realId}"，需去掉前缀
       const stripCommentPrefix = id => id.startsWith('comment-') ? id.slice(8) : id;
       const comments = [];
       document.querySelectorAll('.parent-comment').forEach(el => {
         const rawId = el.id || el.getAttribute('data-id') || '';
         const idEl = stripCommentPrefix(rawId);
-        const contentEl = el.querySelector('.content, .comment-content, p.note-text');
-        const userEl = el.querySelector('.user-info .name, .author-name, .nickname');
+        // 顶级评论内容：comment-item 下的 .note-text
+        const commentItem = el.querySelector('[id^="comment-"]') || el;
+        const contentEl = commentItem.querySelector('.note-text, .content, .comment-content');
+        // 用户名：.name 在 .author-wrapper 或 .user-info 内
+        const userEl = commentItem.querySelector('.author-wrapper .name, .user-info .name, .name');
+        // 子评论：在 parent-comment 内所有 [id^="comment-"] 中排除自身
         const subComments = [];
-        el.querySelectorAll('.child-comment, .sub-comment').forEach(sub => {
-          const subContent = sub.querySelector('.content, p.note-text');
-          const subUser = sub.querySelector('.user-info .name, .nickname');
-          const subRawId = sub.id || sub.getAttribute('data-id') || '';
+        const selfId = commentItem.id || rawId;
+        el.querySelectorAll('[id^="comment-"]').forEach(sub => {
+          if (sub.id === selfId) return;
+          const subContent = sub.querySelector('.note-text, .content');
+          const subUser = sub.querySelector('.author-wrapper .name, .name');
           subComments.push({
-            id: stripCommentPrefix(subRawId),
+            id: stripCommentPrefix(sub.id || ''),
             content: subContent ? subContent.textContent?.trim() : '',
             userId: sub.getAttribute('data-user-id') || '',
             nickname: subUser ? subUser.textContent?.trim() : '',
@@ -1012,11 +1192,10 @@ async function extractSubCommentsFromDOM(
       parentComment.querySelectorAll('[id^="comment-"]').forEach(el => {
         if (el.id === parentId) return;
 
-        // 取所有 .name 元素，区分作者和被回复人
-        const allNameEls = el.querySelectorAll('.name, .author-name, .nickname');
+        // 取作者名：优先 .author-wrapper .name，降级到 .name
+        const allNameEls = el.querySelectorAll('.author-wrapper .name, .name');
         let authorName = '';
         for (const n of allNameEls) {
-          // 不在 .note-text / .reply-content 内的是作者
           if (!n.closest('.note-text, .reply-content, .reply-to-container')) {
             authorName = n.textContent?.trim() || '';
             if (authorName) break;
@@ -1101,7 +1280,7 @@ async function scrollToParentComment(
   await evaluate(
     targetId,
     `() => {
-      const el = document.querySelector('.comments-container, #comments');
+      const el = document.querySelector('.comments-container, .interaction-container, #noteContainer');
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }`,
     profile,
@@ -1134,7 +1313,7 @@ async function scrollToParentComment(
     if (count === prevCount) {
       stagnant++;
       if (stagnant >= 3) break;
-      await evaluate(targetId, `() => window.scrollBy(0, window.innerHeight * 2)`, profile);
+      await smartScroll(targetId, 1200, profile);
     } else {
       stagnant = 0;
     }
@@ -1146,10 +1325,10 @@ async function scrollToParentComment(
         const comments = document.querySelectorAll('.parent-comment');
         const last = comments[comments.length - 1];
         if (last) last.scrollIntoView({ behavior: 'smooth', block: 'end' });
-        else window.scrollBy(0, window.innerHeight);
       }`,
       profile,
     );
+    await smartScroll(targetId, 600, profile);
     await sleep(600);
   }
 

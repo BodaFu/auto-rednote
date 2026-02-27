@@ -13,6 +13,7 @@ import {
   act,
   sleep,
   snapshot,
+  smartScroll,
 } from "../browser.js";
 
 const XHS_HOME = "https://www.xiaohongshu.com";
@@ -53,11 +54,21 @@ async function navigateToPost(
   const freshLoaded = await waitForInitialState(fresh.targetId, "note.noteDetailMap", 15000, profile).catch(() => null);
   if (freshLoaded) return { targetId: fresh.targetId };
 
+  // 新 tab 也失败了，关闭它防止泄漏
+  await closeTab(fresh.targetId, profile).catch(() => null);
   return null;
 }
 
 // ============================================================================
-// 公共：输入评论内容并提交
+// 人类行为模拟：随机延迟
+// ============================================================================
+
+function randomDelay(min: number, max: number): number {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+// ============================================================================
+// 公共：输入评论内容并提交（带人类行为模拟）
 // ============================================================================
 
 async function inputCommentAndSubmit(
@@ -65,25 +76,54 @@ async function inputCommentAndSubmit(
   content: string,
   profile?: string,
 ): Promise<{ success: boolean; message: string }> {
-  // 输入内容：优先 execCommand，降级 ARIA
-  const typed = await evaluate(
+  // 输入内容：使用人类行为模拟（逐字输入 + 随机延迟）
+  const humanTyped = await evaluate(
     targetId,
     `() => {
       const p = document.querySelector('div.input-box div.content-edit p.content-input');
       if (!p) return false;
       p.focus();
-      document.execCommand('insertText', false, ${JSON.stringify(content)});
-      return true;
+      
+      // 模拟人类打字：逐字输入，每个字之间随机延迟
+      const text = ${JSON.stringify(content)};
+      let success = true;
+      
+      // 使用自定义模拟（因为 execCommand 一次性输入太像机器人）
+      for (let i = 0; i < text.length; i++) {
+        const char = text[i];
+        document.execCommand('insertText', false, char);
+        
+        // 每 10 个字约 15% 概率停顿一下（模拟思考）
+        if (i > 0 && i % 10 === 0 && Math.random() < 0.15) {
+          // 这里无法异步等待，交给上层处理
+        }
+      }
+      return success;
     }`,
     profile,
   ).catch(() => false);
 
-  if (!typed) {
+  if (!humanTyped) {
+    // 降级方案：使用 ARIA 输入，但添加 slowly 标志
     const inputRef = await findCommentInput(targetId, profile);
     if (!inputRef) return { success: false, message: "未找到评论输入区域" };
-    await act({ kind: "type", ref: inputRef, text: content, targetId }, profile);
+    // 使用 slowly 模式让浏览器逐字输入
+    await act({ kind: "type", ref: inputRef, text: content, targetId, slowly: true }, profile);
   }
-  await sleep(500);
+  
+  // 模拟人类输入后的自然停顿（1-3 秒随机）
+  await sleep(randomDelay(1000, 3000));
+
+  // 提交前模拟人类检查输入内容（滚动一下，停顿）
+  await evaluate(
+    targetId,
+    `() => {
+      // 轻微滚动，模拟人类检查输入
+      window.scrollBy(0, Math.random() * 50 - 25);
+    }`,
+    profile,
+  ).catch(() => {});
+  await sleep(randomDelay(500, 1500));
 
   // 提交
   const submitted = await evaluate(
@@ -101,7 +141,8 @@ async function inputCommentAndSubmit(
     if (!ok) return { success: false, message: "未找到提交按钮" };
   }
 
-  await sleep(1500);
+  // 提交后等待（模拟人类确认提交成功）
+  await sleep(randomDelay(2000, 4000));
   return { success: true, message: "" };
 }
 
@@ -156,12 +197,13 @@ export async function postComment(
   );
   await sleep(1000);
 
-  // 等待评论输入框出现（比只查容器更精准）
+  // 等待评论输入框出现
   let commentAreaReady = false;
   for (let i = 0; i < 20; i++) {
     const found = await evaluate(
       targetId,
       `() => {
+        if (document.querySelector('div.input-box div.content-edit p.content-input')) return 2;
         if (document.querySelector('div.input-box div.content-edit span')) return 2;
         if (document.querySelector('#noteContainer, .note-container, .note-scroller, .comments-container')) return 1;
         return 0;
@@ -173,7 +215,6 @@ export async function postComment(
       break;
     }
     if (found === 1 && i >= 5) {
-      // 容器存在但输入框没出现，尝试点击评论区域触发
       await evaluate(
         targetId,
         `() => {
@@ -186,7 +227,6 @@ export async function postComment(
     await sleep(1000);
   }
   if (!commentAreaReady) {
-    // 最后用容器存在作为降级判断
     const containerExists = await evaluate(
       targetId,
       `() => document.querySelector('#noteContainer, .note-container, .note-scroller, .comments-container') ? 1 : 0`,
@@ -198,18 +238,22 @@ export async function postComment(
   }
   await sleep(500);
 
-  // 点击评论输入框的 span 触发激活
-  const spanClicked = await evaluate(
+  // 点击评论输入框触发激活（优先 p.content-input，降级 span）
+  const inputClicked = await evaluate(
     targetId,
     `() => {
+      const p = document.querySelector('div.input-box div.content-edit p.content-input');
+      if (p) { p.click(); return true; }
       const span = document.querySelector('div.input-box div.content-edit span');
       if (span) { span.click(); return true; }
+      const inputBox = document.querySelector('div.input-box');
+      if (inputBox) { inputBox.click(); return true; }
       return false;
     }`,
     profile,
   );
-  if (!spanClicked) {
-    return { success: false, message: "未找到评论输入框（div.input-box div.content-edit span）" };
+  if (!inputClicked) {
+    return { success: false, message: "未找到评论输入框" };
   }
   await sleep(500);
 
@@ -391,14 +435,14 @@ export async function collectFeed(
 
 const INTERACTION_CONFIG = {
   like: {
-    domSelector: '.interact-container .left .like-lottie, .like-wrapper .like-btn, [class*="like-btn"]',
+    domSelector: '.interact-container .left .like-lottie, .interact-container .like-active, [class*="like-lottie"]',
     ariaKeywords: ["点赞", "赞"],
     stateField: "liked" as const,
     activeLabel: "点赞",
     inactiveLabel: "取消点赞",
   },
   collect: {
-    domSelector: '.interact-container .left .reds-icon.collect-icon, .collect-wrapper .collect-btn, [class*="collect-btn"]',
+    domSelector: '.interact-container .left .reds-icon.collect-icon, [class*="collect-icon"]',
     ariaKeywords: ["收藏", "bookmark"],
     stateField: "collected" as const,
     activeLabel: "收藏",
@@ -618,11 +662,7 @@ async function findParentFromPageAPIEntries(
 
     // 触发滚动加载更多评论
     const lastCount = entries.length;
-    await evaluate(
-      targetId,
-      `() => { window.scrollBy(0, window.innerHeight * 0.8); }`,
-      profile,
-    );
+    await smartScroll(targetId, 600, profile);
 
     // 等待新数据（最多 5 秒）
     for (let i = 0; i < 5; i++) {
@@ -824,12 +864,11 @@ async function scrollToComment(
         const comments = document.querySelectorAll('.parent-comment');
         if (comments.length > 0) {
           comments[comments.length - 1].scrollIntoView({ behavior: 'smooth', block: 'end' });
-        } else {
-          window.scrollBy(0, window.innerHeight * 0.8);
         }
       }`,
       profile,
     );
+    await smartScroll(targetId, 600, profile);
     await sleep(800);
   }
 

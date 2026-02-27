@@ -394,9 +394,7 @@ async function clickPublishButton(targetId: string, profile?: string): Promise<b
   const clicked = await evaluate(
     targetId,
     `() => {
-      // 优先精确匹配发布按钮
       const selectors = [
-        'button.css-k01jl8',
         '.publishBtn button',
         'button.el-button--primary',
         '.publish-page-publish-btn button.bg-red',

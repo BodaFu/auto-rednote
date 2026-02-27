@@ -76,7 +76,13 @@ import {
   getCurrentElements,
 } from "./src/desktop/im.js";
 import { DEFAULT_PEEKABOO_CONFIG } from "./src/desktop/peekaboo.js";
-
+import { DEFAULT_GHOST_CONFIG, type GhostConfig } from "./src/desktop/ghost.js";
+import {
+  desktopListFeeds,
+  desktopSearch,
+  desktopGetFeed,
+  desktopGoBack,
+} from "./src/actions/desktop-feeds.js";
 export default function register(api: OpenClawPluginApi) {
   // 初始化配置
   const pluginCfg = (api.pluginConfig ?? {}) as {
@@ -92,6 +98,8 @@ export default function register(api: OpenClawPluginApi) {
      * - false：专用设备部署（无人值守），操作完保持在小红书界面
      */
     desktopRestoreApp?: boolean;
+    ghostPath?: string;
+    ghostAppName?: string;
   };
 
   const dbPath = pluginCfg.dbPath;
@@ -108,6 +116,13 @@ export default function register(api: OpenClawPluginApi) {
     ...(pluginCfg.desktopRestoreApp !== undefined
       ? { restoreApp: pluginCfg.desktopRestoreApp }
       : {}),
+  };
+
+  // 桌面端配置（Ghost OS）
+  const ghostConfig: GhostConfig = {
+    ...DEFAULT_GHOST_CONFIG,
+    ...(pluginCfg.ghostPath ? { bin: pluginCfg.ghostPath } : {}),
+    ...(pluginCfg.ghostAppName ? { appName: pluginCfg.ghostAppName } : {}),
   };
 
   // 初始化 SQLite 状态数据库
@@ -228,7 +243,12 @@ export default function register(api: OpenClawPluginApi) {
   api.registerTool(
     {
       name: "xhs_search",
-      description: "搜索小红书内容。支持按排序方式、笔记类型、发布时间筛选。",
+      description: `搜索小红书内容。支持按排序方式、笔记类型、发布时间、搜索范围筛选。
+
+⚠️ 曝光策略建议：
+- 评论引流时优先使用 sortBy="latest" + timeRange="day" 或 "week"，在新鲜帖子下评论更容易被看到
+- sortBy="most_liked" 适合找高流量帖子蹭热度，但竞争激烈
+- sortBy="most_commented" 适合找讨论活跃的帖子，评论被看到的概率更高`,
       parameters: Type.Object({
         keyword: Type.String({ description: "搜索关键词" }),
         sortBy: Type.Optional(
@@ -242,13 +262,13 @@ export default function register(api: OpenClawPluginApi) {
             ],
             {
               description:
-                "排序方式：general（综合）、latest（最新）、most_liked（最多点赞）、most_commented（最多评论）、most_collected（最多收藏）",
+                "排序方式：general（综合，默认）、latest（最新）、most_liked（最多点赞）、most_commented（最多评论）、most_collected（最多收藏）",
             },
           ),
         ),
         noteType: Type.Optional(
           Type.Union([Type.Literal("all"), Type.Literal("video"), Type.Literal("normal")], {
-            description: "笔记类型：all（不限）、video（视频）、normal（图文）",
+            description: "笔记类型：all（不限，默认）、video（视频）、normal（图文）",
           }),
         ),
         timeRange: Type.Optional(
@@ -261,7 +281,21 @@ export default function register(api: OpenClawPluginApi) {
             ],
             {
               description:
-                "发布时间：all（不限）、day（一天内）、week（一周内）、half_year（半年内）",
+                "发布时间：all（不限，默认）、day（一天内）、week（一周内）、half_year（半年内）",
+            },
+          ),
+        ),
+        searchScope: Type.Optional(
+          Type.Union(
+            [
+              Type.Literal("all"),
+              Type.Literal("viewed"),
+              Type.Literal("not_viewed"),
+              Type.Literal("following"),
+            ],
+            {
+              description:
+                "搜索范围：all（不限，默认）、viewed（已看过）、not_viewed（未看过）、following（已关注）",
             },
           ),
         ),
@@ -280,6 +314,7 @@ export default function register(api: OpenClawPluginApi) {
             sortBy: params.sortBy as "general" | "latest" | undefined,
             noteType: params.noteType as "all" | "video" | "normal" | undefined,
             timeRange: params.timeRange as "all" | "day" | "week" | "half_year" | undefined,
+            searchScope: params.searchScope as "all" | "viewed" | "not_viewed" | "following" | undefined,
           },
           browserProfile,
         );
@@ -1077,6 +1112,163 @@ export default function register(api: OpenClawPluginApi) {
             },
           ],
           details: { screenshotPath: scr.path },
+        };
+      },
+    },
+    { optional: true },
+  );
+
+  // ============================================================================
+  // 桌面端 Feed 工具（Ghost OS）
+  // 通过 GUI 操作小红书 macOS App，替代网页端 CDP 操作，降低风控风险。
+  // 数据通过 AX 树深度遍历提取，不依赖网页端 __INITIAL_STATE__。
+  // ============================================================================
+
+  api.registerTool(
+    {
+      name: "xhs_desktop_list_feeds",
+      description: `获取小红书桌面 App 首页推荐 Feed 列表。
+
+通过 Ghost OS 操作小红书 macOS App（非网页端），从 AX 树提取 Feed 卡片信息。
+返回笔记标题、作者、点赞数等。同时返回截图用于视觉确认。
+
+⚠️ 与网页端 xhs_list_feeds 的区别：
+- 无 feedId/xsecToken（桌面端无法获取内部 ID）
+- 数据来自 AX 树文本提取，可能不如网页端完整
+- 操作通过 GUI 完成，更像真人行为，风控风险更低
+- 需要小红书 macOS App 在本地运行`,
+      parameters: Type.Object({}),
+      async execute(_id: string, _params: Record<string, unknown>) {
+        const result = await desktopListFeeds(ghostConfig);
+        const summary = `从桌面 App 获取到 ${result.items.length} 条推荐笔记`;
+        const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [
+          { type: "text" as const, text: `${summary}\n${JSON.stringify(result.items, null, 2)}` },
+        ];
+        if (result.screenshot) {
+          content.push({
+            type: "image" as const,
+            data: result.screenshot.base64,
+            mimeType: result.screenshot.mimeType,
+          });
+        }
+        return {
+          content,
+          details: {
+            count: result.items.length,
+            items: result.items,
+            rawText: result.rawText,
+          },
+        };
+      },
+    },
+    { optional: true },
+  );
+
+  api.registerTool(
+    {
+      name: "xhs_desktop_search",
+      description: `在小红书桌面 App 中搜索内容。
+
+通过 Ghost OS 操作小红书 macOS App 的搜索功能，输入关键词并提取搜索结果。
+返回内容摘要、作者、发布时间、点赞数等。同时返回截图用于视觉确认。
+
+⚠️ 与网页端 xhs_search 的区别：
+- 不支持排序/筛选参数（需要额外 GUI 操作实现）
+- 无 feedId/xsecToken
+- 操作通过 GUI 完成，风控风险更低
+- 需要小红书 macOS App 在本地运行`,
+      parameters: Type.Object({
+        keyword: Type.String({ description: "搜索关键词" }),
+      }),
+      async execute(_id: string, params: Record<string, unknown>) {
+        const keyword = String(params.keyword ?? "");
+        if (!keyword.trim()) throw new Error("keyword 不能为空");
+
+        const result = await desktopSearch(keyword, ghostConfig);
+        const summary = `桌面 App 搜索"${keyword}"找到 ${result.items.length} 条结果`;
+        const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [
+          { type: "text" as const, text: `${summary}\n${JSON.stringify(result.items, null, 2)}` },
+        ];
+        if (result.screenshot) {
+          content.push({
+            type: "image" as const,
+            data: result.screenshot.base64,
+            mimeType: result.screenshot.mimeType,
+          });
+        }
+        return {
+          content,
+          details: {
+            keyword,
+            count: result.items.length,
+            items: result.items,
+            rawText: result.rawText,
+          },
+        };
+      },
+    },
+    { optional: true },
+  );
+
+  api.registerTool(
+    {
+      name: "xhs_desktop_get_feed",
+      description: `获取小红书桌面 App 中的帖子详情。
+
+通过标题文本在当前页面中查找并点击目标帖子，进入详情页后提取内容。
+返回 AX 树原始文本（包含标题、正文、评论等）+ 截图。
+
+⚠️ 使用前提：
+- 当前页面必须有目标帖子可见（首页 Feed 或搜索结果页）
+- 通过 titleQuery 参数匹配帖子标题（模糊匹配）
+- 查看完毕后调用 xhs_desktop_go_back 返回列表页
+
+⚠️ 与网页端 xhs_get_feed 的区别：
+- 通过标题文本定位，而非 feedId
+- 返回 AX 树原始文本，需要 Agent 自行解析
+- 评论数据可能不完整（AX 树限制）`,
+      parameters: Type.Object({
+        titleQuery: Type.String({ description: "帖子标题（或标题中的关键词，用于模糊匹配）" }),
+        scrollForComments: Type.Optional(
+          Type.Boolean({ description: "是否滚动加载评论（默认 true）" }),
+        ),
+      }),
+      async execute(_id: string, params: Record<string, unknown>) {
+        const titleQuery = String(params.titleQuery ?? "");
+        if (!titleQuery.trim()) throw new Error("titleQuery 不能为空");
+
+        const scrollForComments = params.scrollForComments !== false;
+        const result = await desktopGetFeed(titleQuery, ghostConfig, { scrollForComments });
+        const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [
+          { type: "text" as const, text: result.rawText },
+        ];
+        if (result.screenshot) {
+          content.push({
+            type: "image" as const,
+            data: result.screenshot.base64,
+            mimeType: result.screenshot.mimeType,
+          });
+        }
+        return {
+          content,
+          details: { titleQuery, rawText: result.rawText },
+        };
+      },
+    },
+    { optional: true },
+  );
+
+  api.registerTool(
+    {
+      name: "xhs_desktop_go_back",
+      description: `在小红书桌面 App 中返回上一页。点击左上角返回按钮。
+用于从帖子详情页返回列表页，或从搜索结果返回首页。`,
+      parameters: Type.Object({}),
+      async execute(_id: string, _params: Record<string, unknown>) {
+        await desktopGoBack(ghostConfig);
+        return {
+          content: [{ type: "text" as const, text: "已返回上一页" }],
+          details: {},
         };
       },
     },

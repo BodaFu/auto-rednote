@@ -20,37 +20,41 @@ export async function checkLoginStatus(profile?: string): Promise<{
   const { targetId } = await navigateWithWarmup(XHS_EXPLORE, profile);
   await sleep(1500);
 
-  // 检查用户导航元素（已登录时存在）
-  const loggedInFn = `() => {
-    // 已登录：存在用户头像/昵称链接
-    const userLink = document.querySelector('.main-container .user .link-wrapper .channel, .user-info .avatar, .user-wrapper .avatar-wrapper');
-    if (userLink) return true;
-    // 已登录：存在发布按钮
-    const publishBtn = document.querySelector('.upload-entry, [data-v-type="upload"]');
-    if (publishBtn) return true;
-    // 未登录：存在登录按钮
-    const loginBtn = document.querySelector('.login-btn, .sign-in, [class*="login"]');
-    return false;
-  }`;
-
-  const loggedIn = await evaluate(targetId, loggedInFn, profile);
-
-  if (loggedIn === true) {
-    return { loggedIn: true, message: "已登录" };
-  }
-
-  // 二次确认：检查是否有登录弹窗
-  const hasLoginModal = await evaluate(
+  // 优先使用 __INITIAL_STATE__.user.loggedIn（最可靠，不受 DOM 变化影响）
+  const stateCheck = await evaluate(
     targetId,
-    `() => !!document.querySelector('.login-container, .login-popup, [class*="login-modal"]')`,
+    `() => {
+      try {
+        const state = window.__INITIAL_STATE__;
+        if (!state?.user) return null;
+        if (state.user.loggedIn === true) return true;
+        if (state.user.loggedIn === false) return false;
+        const userInfo = state.user.userInfo;
+        const u = userInfo?._value ?? userInfo?.value ?? userInfo;
+        return !!(u?.userId || u?.user_id);
+      } catch { return null; }
+    }`,
     profile,
   );
 
-  if (hasLoginModal === true) {
-    return { loggedIn: false, message: "未登录，检测到登录弹窗" };
+  if (stateCheck === true) {
+    return { loggedIn: true, message: "已登录" };
+  }
+  if (stateCheck === false) {
+    return { loggedIn: false, message: "未登录" };
   }
 
-  // 通过 ARIA 快照检查
+  // __INITIAL_STATE__ 不可用时，降级到 DOM 检测
+  const hasLoginBtn = await evaluate(
+    targetId,
+    `() => !!document.querySelector('.login-btn, .login-container')`,
+    profile,
+  );
+  if (hasLoginBtn === true) {
+    return { loggedIn: false, message: "未登录，检测到登录按钮" };
+  }
+
+  // 最后降级：ARIA 快照
   const snap = await snapshot(targetId, { format: "aria", profile });
   const hasUserProfile = snap.nodes?.some(
     (n) => n.role === "link" && (n.name.includes("个人主页") || n.name.includes("我的主页")),
