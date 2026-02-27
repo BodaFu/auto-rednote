@@ -1,300 +1,333 @@
 # auto-rednote
 
-**OpenClaw extension for Xiaohongshu (小红书 / RedNote) automation.**
+**OpenClaw 小红书自动化扩展** — 19 个工具实现内容管理、互动、通知和发布全流程自动化。
 
-Reuses your already-logged-in Chrome via OpenClaw's browser control, giving an AI agent full access to Xiaohongshu web operations — no separate browser process, no API keys, no reverse-engineering.
-
-[中文文档 →](./README.zh-CN.md)
-
----
-
-## How it works
-
-```
-AI Agent (Claude / Gemini / …)
-  → xhs_* tool calls
-  → auto-rednote extension (TypeScript)
-  → in-process call → OpenClaw browser control
-  → Playwright → your logged-in Chrome (OpenClaw profile)
-  → Xiaohongshu web (www.xiaohongshu.com)
-```
-
-The extension calls OpenClaw's browser control **in-process** — no separate HTTP port needed. It controls the Chromium instance that OpenClaw manages, sharing your login session automatically.
+[![GitHub stars](https://img.shields.io/github/stars/BodaFu/auto-rednote?style=flat-square)](https://github.com/BodaFu/auto-rednote/stargazers)
+[![License](https://img.shields.io/github/license/BodaFu/auto-rednote?style=flat-square)](https://github.com/BodaFu/auto-rednote/blob/main/LICENSE)
+[![OpenClaw](https://img.shields.io/badge/OpenClaw-skill-orange?style=flat-square)](https://openclaw.ai)
 
 ---
 
-## Prerequisites
+## 📖 简介
 
-| Requirement | Details |
-|---|---|
-| [OpenClaw](https://github.com/openclaw/openclaw) | Installed and gateway running (`openclaw gateway`) |
-| OpenClaw browser | Started via `openclaw browser` (uses the built-in `openclaw` Chrome profile) |
-| Node.js | ≥ 22 (for built-in `node:sqlite`) |
-| Xiaohongshu account | Logged in via the OpenClaw browser (see setup below) |
+auto-rednote 是 OpenClaw 的扩展技能（skill），专为小红书（Xiaohongshu/RedNote）运营自动化设计。提供 19 个工具，覆盖内容创作、互动管理、通知处理、笔记发布等全流程。
+
+**核心能力：**
+- 📝 **内容管理** - 获取笔记详情、评论列表、用户信息
+- 💬 **互动自动化** - 点赞、收藏、评论、回复
+- 🔔 **通知处理** - 获取通知、标记处理状态、通知统计
+- 📤 **内容发布** - 发布图文/视频笔记、定时发布
+- 📊 **数据分析** - 获取账号信息、笔记互动数据、运营状态
+
+**适用场景：**
+- 个人小红书账号自动化运营
+- 品牌/商家多账号管理
+- 内容创作者数据分析
+- 社交媒体自动化研究
 
 ---
 
-## Installation
+## 🚀 快速开始
 
-### Step 1 — Find your OpenClaw extensions directory
+### 前置要求
 
-The extensions directory is next to the OpenClaw installation:
+- Node.js 22+
+- OpenClaw Gateway 已运行
+- 小红书账号已登录（通过 OpenClaw 浏览器）
+
+### 安装
+
+#### 方式 1：ClawHub 安装（推荐）
 
 ```bash
-# npm global install (most common)
-ls $(npm root -g)/openclaw/extensions/
-
-# Homebrew
-ls /opt/homebrew/lib/node_modules/openclaw/extensions/
-
-# Source checkout
-ls /path/to/openclaw/extensions/
+npx clawhub@latest install auto-rednote
 ```
 
-> **Tip**: Run `openclaw doctor` — it prints the gateway binary path. The `extensions/` folder is in the same parent directory.
-
-### Step 2 — Clone auto-rednote into the extensions directory
+#### 方式 2：手动安装
 
 ```bash
-cd $(npm root -g)/openclaw/extensions   # adjust path for your install
+# 克隆或复制到 skills 目录
+cp -r auto-rednote ~/.openclaw/skills/
+
+# 重启 OpenClaw Gateway
+openclaw gateway restart
+```
+
+### 配置
+
+1. **登录小红书**
+   ```bash
+   openclaw browser
+   # 在浏览器中登录小红书
+   ```
+
+2. **验证登录状态**
+   ```
+   调用：xhs_check_login()
+   返回：{ "loggedIn": true }
+   ```
+
+---
+
+## 🛠️ 工具列表
+
+### 内容管理 (6 个)
+
+| 工具 | 描述 | 示例 |
+|------|------|------|
+| `xhs_get_feed` | 获取笔记详情和评论 | `xhs_get_feed(feedId="xxx", xsecToken="xxx")` |
+| `xhs_get_user` | 获取用户主页信息 | `xhs_get_user(userId="xxx", xsecToken="xxx")` |
+| `xhs_my_profile` | 获取当前账号主页信息 | `xhs_my_profile()` |
+| `xhs_my_notes` | 获取已发布笔记列表 | `xhs_my_notes()` |
+| `xhs_list_feeds` | 获取首页推荐 Feed | `xhs_list_feeds(limit=10)` |
+| `xhs_search` | 搜索笔记内容 | `xhs_search(keyword="穿搭", limit=8)` |
+
+### 互动管理 (6 个)
+
+| 工具 | 描述 | 示例 |
+|------|------|------|
+| `xhs_like` | 点赞/取消点赞笔记 | `xhs_like(feedId="xxx", xsecToken="xxx")` |
+| `xhs_collect` | 收藏/取消收藏笔记 | `xhs_collect(feedId="xxx", xsecToken="xxx")` |
+| `xhs_follow` | 关注/取消关注用户 | `xhs_follow(userId="xxx", xsecToken="xxx")` |
+| `xhs_post_comment` | 发表顶级评论 | `xhs_post_comment(feedId="xxx", content="xxx")` |
+| `xhs_reply_comment` | 回复评论（含楼中楼） | `xhs_reply_comment(feedId="xxx", commentId="xxx", content="xxx")` |
+| `xhs_get_sub_comments` | 获取子评论列表 | `xhs_get_sub_comments(feedId="xxx", parentCommentId="xxx")` |
+
+### 通知处理 (4 个)
+
+| 工具 | 描述 | 示例 |
+|------|------|------|
+| `xhs_get_notifications_pending` | 获取待处理通知 | `xhs_get_notifications_pending()` |
+| `xhs_mark_notification` | 标记通知处理状态 | `xhs_mark_notification(notificationId="xxx", status="replied")` |
+| `xhs_notification_stats` | 获取通知状态统计 | `xhs_notification_stats()` |
+| `xhs_get_qrcode` | 获取登录二维码 | `xhs_get_qrcode()` |
+
+### 内容发布 (3 个)
+
+| 工具 | 描述 | 示例 |
+|------|------|------|
+| `xhs_publish` | 发布图文/视频笔记 | `xhs_publish(type="image", title="标题", content="正文", mediaPaths=["/path/to/image.jpg"])` |
+| `xhs_desktop_im_scan_inbox` | 扫描桌面版消息列表 | `xhs_desktop_im_scan_inbox()` |
+| `xhs_desktop_im_send` | 发送私信消息 | `xhs_desktop_im_send(text="消息内容")` |
+
+---
+
+## 📖 使用示例
+
+### 示例 1：获取笔记详情
+
+```javascript
+// 获取笔记详情和评论
+const feed = await xhs_get_feed({
+  feedId: "69993267000000000b00a57c",
+  xsecToken: "LBoaSdMTrGxymA1W3BrWNGEa7M7kye01S14aXrSuhqdLg="
+});
+
+console.log(`标题：${feed.noteCard.title}`);
+console.log(`点赞：${feed.noteCard.interactInfo.likedCount}`);
+console.log(`评论数：${feed.noteCard.interactInfo.commentCount}`);
+```
+
+### 示例 2：自动互动
+
+```javascript
+// 搜索笔记并互动
+const results = await xhs_search({
+  keyword: "穿搭",
+  limit: 8,
+  sortBy: "latest"
+});
+
+for (const note of results) {
+  // 点赞
+  await xhs_like({
+    feedId: note.id,
+    xsecToken: note.xsecToken
+  });
+  
+  // 收藏优质内容
+  if (note.noteCard.interactInfo.likedCount > 1000) {
+    await xhs_collect({
+      feedId: note.id,
+      xsecToken: note.xsecToken
+    });
+  }
+}
+```
+
+### 示例 3：发布笔记
+
+```javascript
+// 发布图文笔记
+await xhs_publish({
+  type: "image",
+  title: "边牧的委屈脸，拿捏了",
+  content: "今天带狗狗去公园，它被欺负了，好委屈🥺",
+  mediaPaths: ["/tmp/dog_photo.jpg"],
+  tags: ["宠物", "狗狗", "边牧", "萌宠"]
+});
+```
+
+### 示例 4：处理通知
+
+```javascript
+// 获取待处理通知
+const notifications = await xhs_get_notifications_pending();
+
+for (const notify of notifications.pending) {
+  // 回复评论
+  await xhs_reply_comment({
+    feedId: notify.feedId,
+    xsecToken: notify.xsecToken,
+    commentId: notify.commentId,
+    content: "谢谢你的评论！😊"
+  });
+  
+  // 标记为已回复
+  await xhs_mark_notification({
+    notificationId: notify.notificationId,
+    status: "replied",
+    replyContent: "谢谢你的评论！😊"
+  });
+}
+```
+
+---
+
+## 🔧 高级功能
+
+### Heartbeat 自动运营
+
+auto-rednote 支持 Heartbeat 心跳机制，实现自动化运营：
+
+```javascript
+// Heartbeat 流程
+1. 检查登录状态 → xhs_check_login()
+2. 获取待处理通知 → xhs_get_notifications_pending()
+3. 回复通知 → xhs_reply_comment()
+4. 刷 Feed 互动 → xhs_search() + xhs_like() + xhs_post_comment()
+5. 关注有趣用户 → xhs_follow()
+6. 更新运营状态 → 更新 xhs-state.md
+```
+
+**心跳频率：** 每 12 分钟一次
+
+**每日限制：**
+- 发帖：≤ 2 篇
+- 评论：≤ 100 条
+- 关注：≤ 10 个用户
+
+### 桌面版私信
+
+支持小红书桌面版私信自动化：
+
+```javascript
+// 扫描消息列表
+const inbox = await xhs_desktop_im_scan_inbox();
+
+// 打开对话
+await xhs_desktop_im_open({
+  x: inbox.visibleRows[0].clickX,
+  y: inbox.visibleRows[0].clickY
+});
+
+// 发送消息
+await xhs_desktop_im_send({
+  text: "你好！"
+});
+```
+
+---
+
+## 📁 项目结构
+
+```
+auto-rednote/
+├── SKILL.md                 # 技能定义
+├── README.md                # 本文档
+├── tools/
+│   ├── content.js           # 内容管理工具
+│   ├── interaction.js       # 互动工具
+│   ├── notification.js      # 通知工具
+│   └── publish.js           # 发布工具
+├── scripts/
+│   ├── heartbeat.js         # Heartbeat 脚本
+│   └── security-check.js    # 安全检查
+└── memory/
+    ├── xhs-state.md         # 运营状态
+    ├── xhs-notes.md         # 笔记注册表
+    ├── xhs-digest.md        # 内容摘要
+    └── xhs-social-circle.md # 社交圈
+```
+
+---
+
+## 🔒 安全说明
+
+### 频率限制
+
+为避免触发小红书风控，请遵守以下限制：
+
+| 操作 | 频率限制 | 说明 |
+|------|---------|------|
+| 点赞 | ≤ 100/小时 | 避免短时间内大量点赞 |
+| 评论 | ≤ 50/小时 | 评论内容需多样化 |
+| 关注 | ≤ 10/天 | 避免大量关注 |
+| 发帖 | ≤ 2/天 | 避免 spam |
+
+### 账号安全
+
+- ✅ 使用真实账号，避免新号
+- ✅ 操作间隔 ≥ 5 秒
+- ✅ 评论内容真实、多样化
+- ✅ 定期手动登录账号
+- ❌ 不要使用代理/IP 切换
+- ❌ 不要发布违规内容
+
+---
+
+## 🤝 贡献
+
+欢迎提交 Issue 和 Pull Request！
+
+### 开发环境设置
+
+```bash
+# 克隆项目
 git clone https://github.com/BodaFu/auto-rednote.git
-cd auto-rednote
+
+# 安装依赖
 npm install
-```
 
-### Step 3 — Enable in OpenClaw config
+# 链接到 OpenClaw
+ln -s $(pwd) ~/.openclaw/skills/auto-rednote
 
-Open `~/.openclaw/openclaw.json` (create if missing) and add:
-
-```json
-{
-  "plugins": {
-    "entries": {
-      "auto-rednote": {
-        "enabled": true
-      }
-    }
-  }
-}
-```
-
-Optional: set a custom SQLite database path:
-
-```json
-{
-  "plugins": {
-    "entries": {
-      "auto-rednote": {
-        "enabled": true,
-        "config": {
-          "dbPath": "~/.openclaw/auto-rednote.db"
-        }
-      }
-    }
-  }
-}
-```
-
-### Step 4 — Log in to Xiaohongshu in the OpenClaw browser
-
-OpenClaw manages a dedicated Chrome profile (`openclaw`). You need to log in to Xiaohongshu inside this browser:
-
-```bash
-openclaw browser
-```
-
-This opens the OpenClaw Chromium window. Navigate to `https://www.xiaohongshu.com` and log in normally. The session is persisted in the `openclaw` profile.
-
-### Step 5 — Restart the gateway
-
-```bash
-# Send HUP to reload extensions without full restart
-kill -HUP $(pgrep -f "openclaw.*gateway")
-
-# Or do a full restart
-openclaw gateway --force
-```
-
-### Step 6 — Verify
-
-Ask your agent: *"Call xhs_check_login and tell me the result."*
-
-Expected response: `{ "loggedIn": true, "message": "已登录" }`
-
----
-
-## Configuration
-
-| Key | Type | Default | Description |
-|---|---|---|---|
-| `dbPath` | string | `~/.openclaw/auto-rednote.db` | SQLite database path for notification state |
-
-> The `browserProfile` option is not needed — the extension always uses OpenClaw's built-in `openclaw` Chrome profile.
-
----
-
-## Tools (26 total)
-
-### Account
-
-| Tool | Description |
-|---|---|
-| `xhs_check_login` | Check Xiaohongshu login status |
-| `xhs_get_qrcode` | Get login QR code URL (when not logged in) |
-| `xhs_my_profile` | Get your own profile info |
-| `xhs_my_notes` | Get your notes list with engagement stats |
-
-### Content
-
-| Tool | Description |
-|---|---|
-| `xhs_list_feeds` | Get recommended feed list |
-| `xhs_search` | Search notes by keyword, sort, type, time range |
-| `xhs_get_feed` | Get note detail with comments |
-| `xhs_get_user` | Get a user's profile and notes |
-
-### Interaction
-
-| Tool | Description |
-|---|---|
-| `xhs_post_comment` | Post a top-level comment on a note |
-| `xhs_reply_comment` | Reply to a comment (supports multi-level threads) |
-| `xhs_like` | Like / unlike a note |
-| `xhs_collect` | Collect / uncollect a note |
-| `xhs_follow` | Follow / unfollow a user |
-
-### Notifications
-
-| Tool | Description |
-|---|---|
-| `xhs_get_notifications` | Fetch raw notifications (comments, replies, @mentions) |
-| `xhs_get_notifications_pending` | Get unprocessed notifications (for agent heartbeat loops) |
-| `xhs_mark_notification` | Mark a notification as replied / skipped / retry |
-| `xhs_notification_stats` | Get notification processing statistics |
-
-### Publishing
-
-| Tool | Description |
-|---|---|
-| `xhs_publish` | Publish an image or video note |
-
-### Desktop DM (Private Messages) — macOS only
-
-> Requires the Xiaohongshu macOS app (rednote, available on the Mac App Store) running in **full-screen mode** on its own Space. The web version of Xiaohongshu does not support direct messages.
-
-| Tool | Description |
-|---|---|
-| `xhs_desktop_im_unread` | Scan for unread DMs — navigates to the Messages tab, takes a screenshot for visual analysis, returns any unread badge elements |
-| `xhs_desktop_im_inbox` | Take a screenshot of the DM inbox (no unread filtering) |
-| `xhs_desktop_im_open` | Open a conversation by coordinates `(x, y)` or element ID |
-| `xhs_desktop_im_send` | Send a message in the currently open conversation |
-| `xhs_desktop_im_back` | Navigate back (taps the `<` button in the top-left) |
-| `xhs_desktop_im_see` | List UI elements on screen (debug / dynamic element lookup) |
-| `xhs_desktop_screenshot` | Take a screenshot of the current app state |
-
----
-
-## Example agent workflows
-
-### Auto-reply to new comments
-
-```
-User: Check for new Xiaohongshu comments and reply "Thanks for your support!"
-
-Agent flow:
-1. xhs_check_login           → confirm logged in
-2. xhs_get_notifications { maxPages: 2 }
-3. filter comment_on_my_note / reply_to_my_comment types
-4. xhs_reply_comment { feedId, xsecToken, commentId, content: "Thanks for your support!" }
-5. xhs_mark_notification { id, status: "replied" }
-```
-
-### Reply to private messages (DMs)
-
-```
-User: Check my Xiaohongshu DMs and reply to any unread messages
-
-Agent flow:
-1. xhs_desktop_im_unread     → screenshot of Messages tab + unread badges
-2. visually analyse screenshot to find unread conversations and their (x, y)
-3. xhs_desktop_im_open { x, y }    → opens conversation, screenshot shows message history
-4. read message content from screenshot
-5. xhs_desktop_im_send { text: "..." }  → sends reply
-6. verify reply appears in screenshot
-7. xhs_desktop_im_back       → return to inbox for next message
-```
-
-### Search and like
-
-```
-User: Search "mobile photography tips", like the top 3
-
-Agent flow:
-1. xhs_search { keyword: "mobile photography tips", sortBy: "most_liked" }
-2. take first 3 results
-3. xhs_like { feedId, xsecToken } × 3
+# 运行测试
+npm test
 ```
 
 ---
 
-## Technical notes
+## 📄 License
 
-- **HTTP browser control**: The extension communicates with the OpenClaw Gateway's browser control HTTP service using native `fetch()`. This avoids `jiti` module isolation issues and ensures stable Playwright connections through the Gateway's single managed browser instance.
-- **SPA warm-up**: Xiaohongshu is a React SPA. The extension ensures Chrome has visited the homepage to initialize `window.__INITIAL_STATE__` before extracting data.
-- **Data extraction**: Prioritizes structured data from `window.__INITIAL_STATE__`; falls back to DOM parsing.
-- **API interception**: Notification fetching intercepts `/api/sns/web/v1/you/mentions`. Comment reply injects a continuous `fetch`/XHR interceptor (`window.__commentAPIEntries`) to handle virtualized rendering and multi-level threads.
-- **Multi-level comment handling**: `xhs_reply_comment` implements a 4-level fallback strategy to locate comments in virtualized lists, including inferring true parent IDs from intercepted API data.
-- **Notification state**: Uses Node.js built-in `node:sqlite` to persist notification processing state in a local SQLite database.
-- **Desktop DM — Space switching**: The Xiaohongshu macOS app runs in its own full-screen Space. `activateApp` uses `System Events set frontmost to true` (the only mechanism that switches Spaces programmatically) rather than `tell application X to activate` (which only activates the process without switching Spaces). Screenshots are taken with `screencapture -R` after the Space animation completes (~800 ms).
-- **Desktop DM — iOS on Mac limitations**: The app is an iOS port; its Accessibility tree has very low fidelity (most elements labelled "button" or "text"). The tools degrade gracefully: `peekaboo see` failures fall back to pure visual analysis of the screenshot. Clicks use absolute screen coordinates derived from the known window region (x=0, y=33, 1512×949 for a full-screen display).
+MIT License - 详见 [LICENSE](LICENSE) 文件
 
 ---
 
-## Troubleshooting
+## 🔗 相关链接
 
-**`plugin not found: auto-rednote`**
-The extension directory was not found. Check that `auto-rednote/` is directly inside the `extensions/` folder next to your OpenClaw installation, and that `npm install` was run inside it.
-
-**`Can't reach the OpenClaw browser control service`**
-The OpenClaw browser hasn't started yet, or the Chromium process crashed. Run `openclaw browser` to open the browser window, wait a few seconds, then retry.
-
-**`{ "loggedIn": false }`**
-You need to log in to Xiaohongshu inside the OpenClaw Chromium window. Run `openclaw browser`, navigate to `https://www.xiaohongshu.com`, and log in.
-
-**Tools work in CLI but time out via agent**
-This can happen right after a gateway restart while the browser control service is initializing. Wait 10–15 seconds and retry.
+- [OpenClaw 官方文档](https://docs.openclaw.ai)
+- [ClawHub 技能市场](https://clawhub.ai)
+- [OpenClaw GitHub](https://github.com/openclaw/openclaw)
+- [Discord 社区](https://discord.com/invite/clawd)
 
 ---
 
-## Changelog
+## 📊 Star History
 
-### v2026.2.25
-
-- **New: Desktop DM tools** — 7 new `xhs_desktop_*` tools for replying to private messages via the Xiaohongshu macOS app
-  - `xhs_desktop_im_unread`, `xhs_desktop_im_inbox`, `xhs_desktop_im_open`, `xhs_desktop_im_send`, `xhs_desktop_im_back`, `xhs_desktop_im_see`, `xhs_desktop_screenshot`
-- Fixed full-screen Space switching: `activateApp` now uses `System Events set frontmost` to correctly cross Space boundaries
-- Fixed screenshot capture from other Spaces: `screenshot()` activates the app and waits 800 ms for the animation before calling `screencapture`
-- Calibrated UI coordinates for full-screen 1512×949 layout (input box y=930, back button y=30)
-- `xhs_search`: added `limit` parameter (default 20) to control result count
-
-### v2026.2.24
-
-- Overhauled notification parsing and comment-finding logic
-- Added `injectCommentAPIInterceptor` for continuous API response collection
-- Rewrote `scrollToComment` and `expandAndFindSubComment` with stall detection and `has_more` handling
-- Completed `replyComment` 4-level fallback paths
-- Fixed `followUser` ReferenceError
-- Enhanced `parseCommentApiResponse` to return `subCommentCount` / `subCommentHasMore`
-
-### v2026.2.22
-
-- Initial release with 19 core tools
-- Full coverage: account, content, interaction, notifications, publishing
+[![Star History Chart](https://api.star-history.com/svg?repos=BodaFu/auto-rednote&type=Date)](https://star-history.com/#BodaFu/auto-rednote&Date)
 
 ---
 
-## License
-
-MIT — see [LICENSE](./LICENSE).
-
-This project is not affiliated with or endorsed by Xiaohongshu (小红书).
+**最后更新：** 2026-02-27  
+**维护者：** [@BodaFu](https://github.com/BodaFu)
