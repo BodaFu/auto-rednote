@@ -1,333 +1,322 @@
 # auto-rednote
 
-**OpenClaw 小红书自动化扩展** — 19 个工具实现内容管理、互动、通知和发布全流程自动化。
+**小红书自动化运营 OpenClaw 插件。**
 
-[![GitHub stars](https://img.shields.io/github/stars/BodaFu/auto-rednote?style=flat-square)](https://github.com/BodaFu/auto-rednote/stargazers)
-[![License](https://img.shields.io/github/license/BodaFu/auto-rednote?style=flat-square)](https://github.com/BodaFu/auto-rednote/blob/main/LICENSE)
-[![OpenClaw](https://img.shields.io/badge/OpenClaw-skill-orange?style=flat-square)](https://openclaw.ai)
+复用你已登录的 Chrome（通过 OpenClaw browser control），让 AI Agent 获得完整的小红书网页端操作能力——无需独立浏览器进程，无需 API Key，无需逆向工程。
 
----
-
-## 📖 简介
-
-auto-rednote 是 OpenClaw 的扩展技能（skill），专为小红书（Xiaohongshu/RedNote）运营自动化设计。提供 19 个工具，覆盖内容创作、互动管理、通知处理、笔记发布等全流程。
-
-**核心能力：**
-- 📝 **内容管理** - 获取笔记详情、评论列表、用户信息
-- 💬 **互动自动化** - 点赞、收藏、评论、回复
-- 🔔 **通知处理** - 获取通知、标记处理状态、通知统计
-- 📤 **内容发布** - 发布图文/视频笔记、定时发布
-- 📊 **数据分析** - 获取账号信息、笔记互动数据、运营状态
-
-**适用场景：**
-- 个人小红书账号自动化运营
-- 品牌/商家多账号管理
-- 内容创作者数据分析
-- 社交媒体自动化研究
+[English →](./README.en.md)
 
 ---
 
-## 🚀 快速开始
+## 工作原理
 
-### 前置要求
+```
+AI Agent（Claude / Gemini / …）
+  → xhs_* 工具调用
+  → auto-rednote 插件（TypeScript）
+  → 进程内调用 → OpenClaw browser control
+  → Playwright → OpenClaw 管理的 Chrome（openclaw profile）
+  → 小红书网页端（www.xiaohongshu.com）
+```
 
-- Node.js 22+
-- OpenClaw Gateway 已运行
-- 小红书账号已登录（通过 OpenClaw 浏览器）
+插件通过**进程内调用**直接使用 OpenClaw 的 browser control，无需独立 HTTP 端口。它控制 OpenClaw 管理的 Chromium 实例，自动共享你的登录会话。
 
-### 安装
+---
 
-#### 方式 1：ClawHub 安装（推荐）
+## 前置条件
+
+| 依赖 | 说明 |
+|---|---|
+| [OpenClaw](https://github.com/openclaw/openclaw) | 已安装，Gateway 正在运行（`openclaw gateway`） |
+| OpenClaw browser | 已通过 `openclaw browser` 启动（使用内置 `openclaw` Chrome profile） |
+| Node.js | ≥ 22（使用内置 `node:sqlite`） |
+| 小红书账号 | 已在 OpenClaw browser 中登录（见下方步骤） |
+
+---
+
+## 安装步骤
+
+### 第 1 步 — 找到 OpenClaw 的 extensions 目录
+
+extensions 目录紧邻 OpenClaw 安装目录：
 
 ```bash
-npx clawhub@latest install auto-rednote
+# npm 全局安装（最常见）
+ls $(npm root -g)/openclaw/extensions/
+
+# Homebrew
+ls /opt/homebrew/lib/node_modules/openclaw/extensions/
+
+# 源码目录
+ls /path/to/openclaw/extensions/
 ```
 
-#### 方式 2：手动安装
+> **提示**：运行 `openclaw doctor`，输出中会显示 gateway 二进制路径，`extensions/` 就在同级目录下。
+
+### 第 2 步 — 将 auto-rednote clone 到 extensions 目录
 
 ```bash
-# 克隆或复制到 skills 目录
-cp -r auto-rednote ~/.openclaw/skills/
-
-# 重启 OpenClaw Gateway
-openclaw gateway restart
+cd $(npm root -g)/openclaw/extensions   # 根据你的安装方式调整路径
+git clone https://github.com/BodaFu/auto-rednote.git
+cd auto-rednote
+npm install
 ```
 
-### 配置
+### 第 3 步 — 在 OpenClaw 配置中启用
 
-1. **登录小红书**
-   ```bash
-   openclaw browser
-   # 在浏览器中登录小红书
-   ```
+打开 `~/.openclaw/openclaw.json`（不存在则新建），添加：
 
-2. **验证登录状态**
-   ```
-   调用：xhs_check_login()
-   返回：{ "loggedIn": true }
-   ```
-
----
-
-## 🛠️ 工具列表
-
-### 内容管理 (6 个)
-
-| 工具 | 描述 | 示例 |
-|------|------|------|
-| `xhs_get_feed` | 获取笔记详情和评论 | `xhs_get_feed(feedId="xxx", xsecToken="xxx")` |
-| `xhs_get_user` | 获取用户主页信息 | `xhs_get_user(userId="xxx", xsecToken="xxx")` |
-| `xhs_my_profile` | 获取当前账号主页信息 | `xhs_my_profile()` |
-| `xhs_my_notes` | 获取已发布笔记列表 | `xhs_my_notes()` |
-| `xhs_list_feeds` | 获取首页推荐 Feed | `xhs_list_feeds(limit=10)` |
-| `xhs_search` | 搜索笔记内容 | `xhs_search(keyword="穿搭", limit=8)` |
-
-### 互动管理 (6 个)
-
-| 工具 | 描述 | 示例 |
-|------|------|------|
-| `xhs_like` | 点赞/取消点赞笔记 | `xhs_like(feedId="xxx", xsecToken="xxx")` |
-| `xhs_collect` | 收藏/取消收藏笔记 | `xhs_collect(feedId="xxx", xsecToken="xxx")` |
-| `xhs_follow` | 关注/取消关注用户 | `xhs_follow(userId="xxx", xsecToken="xxx")` |
-| `xhs_post_comment` | 发表顶级评论 | `xhs_post_comment(feedId="xxx", content="xxx")` |
-| `xhs_reply_comment` | 回复评论（含楼中楼） | `xhs_reply_comment(feedId="xxx", commentId="xxx", content="xxx")` |
-| `xhs_get_sub_comments` | 获取子评论列表 | `xhs_get_sub_comments(feedId="xxx", parentCommentId="xxx")` |
-
-### 通知处理 (4 个)
-
-| 工具 | 描述 | 示例 |
-|------|------|------|
-| `xhs_get_notifications_pending` | 获取待处理通知 | `xhs_get_notifications_pending()` |
-| `xhs_mark_notification` | 标记通知处理状态 | `xhs_mark_notification(notificationId="xxx", status="replied")` |
-| `xhs_notification_stats` | 获取通知状态统计 | `xhs_notification_stats()` |
-| `xhs_get_qrcode` | 获取登录二维码 | `xhs_get_qrcode()` |
-
-### 内容发布 (3 个)
-
-| 工具 | 描述 | 示例 |
-|------|------|------|
-| `xhs_publish` | 发布图文/视频笔记 | `xhs_publish(type="image", title="标题", content="正文", mediaPaths=["/path/to/image.jpg"])` |
-| `xhs_desktop_im_scan_inbox` | 扫描桌面版消息列表 | `xhs_desktop_im_scan_inbox()` |
-| `xhs_desktop_im_send` | 发送私信消息 | `xhs_desktop_im_send(text="消息内容")` |
-
----
-
-## 📖 使用示例
-
-### 示例 1：获取笔记详情
-
-```javascript
-// 获取笔记详情和评论
-const feed = await xhs_get_feed({
-  feedId: "69993267000000000b00a57c",
-  xsecToken: "LBoaSdMTrGxymA1W3BrWNGEa7M7kye01S14aXrSuhqdLg="
-});
-
-console.log(`标题：${feed.noteCard.title}`);
-console.log(`点赞：${feed.noteCard.interactInfo.likedCount}`);
-console.log(`评论数：${feed.noteCard.interactInfo.commentCount}`);
-```
-
-### 示例 2：自动互动
-
-```javascript
-// 搜索笔记并互动
-const results = await xhs_search({
-  keyword: "穿搭",
-  limit: 8,
-  sortBy: "latest"
-});
-
-for (const note of results) {
-  // 点赞
-  await xhs_like({
-    feedId: note.id,
-    xsecToken: note.xsecToken
-  });
-  
-  // 收藏优质内容
-  if (note.noteCard.interactInfo.likedCount > 1000) {
-    await xhs_collect({
-      feedId: note.id,
-      xsecToken: note.xsecToken
-    });
+```json
+{
+  "plugins": {
+    "entries": {
+      "auto-rednote": {
+        "enabled": true
+      }
+    }
   }
 }
 ```
 
-### 示例 3：发布笔记
+可选：指定自定义数据库路径：
 
-```javascript
-// 发布图文笔记
-await xhs_publish({
-  type: "image",
-  title: "边牧的委屈脸，拿捏了",
-  content: "今天带狗狗去公园，它被欺负了，好委屈🥺",
-  mediaPaths: ["/tmp/dog_photo.jpg"],
-  tags: ["宠物", "狗狗", "边牧", "萌宠"]
-});
-```
-
-### 示例 4：处理通知
-
-```javascript
-// 获取待处理通知
-const notifications = await xhs_get_notifications_pending();
-
-for (const notify of notifications.pending) {
-  // 回复评论
-  await xhs_reply_comment({
-    feedId: notify.feedId,
-    xsecToken: notify.xsecToken,
-    commentId: notify.commentId,
-    content: "谢谢你的评论！😊"
-  });
-  
-  // 标记为已回复
-  await xhs_mark_notification({
-    notificationId: notify.notificationId,
-    status: "replied",
-    replyContent: "谢谢你的评论！😊"
-  });
+```json
+{
+  "plugins": {
+    "entries": {
+      "auto-rednote": {
+        "enabled": true,
+        "config": {
+          "dbPath": "~/.openclaw/auto-rednote.db"
+        }
+      }
+    }
+  }
 }
 ```
 
----
+### 第 4 步 — 在 OpenClaw browser 中登录小红书
 
-## 🔧 高级功能
-
-### Heartbeat 自动运营
-
-auto-rednote 支持 Heartbeat 心跳机制，实现自动化运营：
-
-```javascript
-// Heartbeat 流程
-1. 检查登录状态 → xhs_check_login()
-2. 获取待处理通知 → xhs_get_notifications_pending()
-3. 回复通知 → xhs_reply_comment()
-4. 刷 Feed 互动 → xhs_search() + xhs_like() + xhs_post_comment()
-5. 关注有趣用户 → xhs_follow()
-6. 更新运营状态 → 更新 xhs-state.md
-```
-
-**心跳频率：** 每 12 分钟一次
-
-**每日限制：**
-- 发帖：≤ 2 篇
-- 评论：≤ 100 条
-- 关注：≤ 10 个用户
-
-### 桌面版私信
-
-支持小红书桌面版私信自动化：
-
-```javascript
-// 扫描消息列表
-const inbox = await xhs_desktop_im_scan_inbox();
-
-// 打开对话
-await xhs_desktop_im_open({
-  x: inbox.visibleRows[0].clickX,
-  y: inbox.visibleRows[0].clickY
-});
-
-// 发送消息
-await xhs_desktop_im_send({
-  text: "你好！"
-});
-```
-
----
-
-## 📁 项目结构
-
-```
-auto-rednote/
-├── SKILL.md                 # 技能定义
-├── README.md                # 本文档
-├── tools/
-│   ├── content.js           # 内容管理工具
-│   ├── interaction.js       # 互动工具
-│   ├── notification.js      # 通知工具
-│   └── publish.js           # 发布工具
-├── scripts/
-│   ├── heartbeat.js         # Heartbeat 脚本
-│   └── security-check.js    # 安全检查
-└── memory/
-    ├── xhs-state.md         # 运营状态
-    ├── xhs-notes.md         # 笔记注册表
-    ├── xhs-digest.md        # 内容摘要
-    └── xhs-social-circle.md # 社交圈
-```
-
----
-
-## 🔒 安全说明
-
-### 频率限制
-
-为避免触发小红书风控，请遵守以下限制：
-
-| 操作 | 频率限制 | 说明 |
-|------|---------|------|
-| 点赞 | ≤ 100/小时 | 避免短时间内大量点赞 |
-| 评论 | ≤ 50/小时 | 评论内容需多样化 |
-| 关注 | ≤ 10/天 | 避免大量关注 |
-| 发帖 | ≤ 2/天 | 避免 spam |
-
-### 账号安全
-
-- ✅ 使用真实账号，避免新号
-- ✅ 操作间隔 ≥ 5 秒
-- ✅ 评论内容真实、多样化
-- ✅ 定期手动登录账号
-- ❌ 不要使用代理/IP 切换
-- ❌ 不要发布违规内容
-
----
-
-## 🤝 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
-### 开发环境设置
+OpenClaw 管理一个独立的 Chrome profile（`openclaw`），需要在这个浏览器里登录小红书：
 
 ```bash
-# 克隆项目
-git clone https://github.com/BodaFu/auto-rednote.git
+openclaw browser
+```
 
-# 安装依赖
-npm install
+这会打开 OpenClaw 的 Chromium 窗口。访问 `https://www.xiaohongshu.com` 正常登录即可。登录状态会持久化在 `openclaw` profile 中。
 
-# 链接到 OpenClaw
-ln -s $(pwd) ~/.openclaw/skills/auto-rednote
+### 第 5 步 — 重启 Gateway
 
-# 运行测试
-npm test
+```bash
+# 发送 HUP 信号，热重载插件（无需完整重启）
+kill -HUP $(pgrep -f "openclaw.*gateway")
+
+# 或者完整重启
+openclaw gateway --force
+```
+
+### 第 6 步 — 验证
+
+向你的 Agent 发送：*"调用 xhs_check_login，告诉我结果。"*
+
+预期返回：`{ "loggedIn": true, "message": "已登录" }`
+
+---
+
+## 配置项
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `dbPath` | string | `~/.openclaw/auto-rednote.db` | 通知状态 SQLite 数据库路径 |
+
+> `browserProfile` 配置项无需设置——插件始终使用 OpenClaw 内置的 `openclaw` Chrome profile。
+
+---
+
+## 工具列表（共 28 个）
+
+### 账号工具
+
+| 工具 | 说明 |
+|---|---|
+| `xhs_check_login` | 检查小红书登录状态 |
+| `xhs_get_qrcode` | 获取登录二维码 URL（未登录时） |
+| `xhs_my_profile` | 获取我的主页信息 |
+| `xhs_my_notes` | 获取我的笔记列表（含互动数据） |
+
+### 内容工具
+
+| 工具 | 说明 |
+|---|---|
+| `xhs_list_feeds` | 获取首页推荐 Feed 列表 |
+| `xhs_search` | 按关键词、排序、类型、时间范围搜索笔记 |
+| `xhs_get_feed` | 获取帖子详情（含评论） |
+| `xhs_get_sub_comments` | 获取某条评论下的所有子评论 |
+| `xhs_get_user` | 获取用户主页信息和笔记列表 |
+
+### 互动工具
+
+| 工具 | 说明 |
+|---|---|
+| `xhs_post_comment` | 在笔记下发表顶级评论 |
+| `xhs_reply_comment` | 回复评论（支持多级评论结构） |
+| `xhs_like` | 点赞 / 取消点赞笔记 |
+| `xhs_collect` | 收藏 / 取消收藏笔记 |
+| `xhs_follow` | 关注 / 取消关注用户 |
+
+### 通知工具
+
+| 工具 | 说明 |
+|---|---|
+| `xhs_get_notifications_pending` | 获取待处理通知（Agent 心跳循环专用） |
+| `xhs_mark_notification` | 标记通知处理结果（replied / skipped / retry） |
+| `xhs_notification_stats` | 获取通知处理状态统计 |
+
+### 发布工具
+
+| 工具 | 说明 |
+|---|---|
+| `xhs_publish` | 发布图文或视频笔记（支持纯文字、定时发布） |
+
+### 桌面 IM 工具（私信回复）— 仅 macOS
+
+> 需要小红书 macOS App（rednote，Mac App Store 可下载）以**全屏模式**运行在独立 Space 中。网页版小红书不支持私信功能。通过 [peekaboo](https://github.com/nicklama/peekaboo) CLI 控制。
+
+| 工具 | 说明 |
+|---|---|
+| `xhs_desktop_im_scan_inbox` | 【推荐】扫描消息列表 + 返回所有可见行的预计算点击坐标 |
+| `xhs_desktop_im_scan_stranger` | 【推荐】扫描陌生人消息列表 + 返回「回复」按钮坐标 |
+| `xhs_desktop_im_unread` | 扫描未读私信（兼容旧版） |
+| `xhs_desktop_im_inbox` | 截图消息收件箱（不过滤未读状态） |
+| `xhs_desktop_im_open` | 通过坐标 `(x, y)` 或元素 ID 打开指定对话 |
+| `xhs_desktop_im_send` | 在当前已打开的对话中发送私信 |
+| `xhs_desktop_im_back` | 返回上一页（点击左上角 `<` 按钮） |
+| `xhs_desktop_im_see` | 列出当前界面所有 UI 元素（调试 / 动态元素定位） |
+| `xhs_desktop_screenshot` | 截图当前小红书 App 界面 |
+
+### 桌面 Feed 工具（Ghost OS）— 仅 macOS
+
+> 通过 Ghost OS 操作小红书 macOS App 的 GUI，从 AX 树提取数据。相比网页端 CDP 操作，更接近真人行为，风控风险更低。
+
+| 工具 | 说明 |
+|---|---|
+| `xhs_desktop_list_feeds` | 获取桌面 App 首页推荐 Feed 列表 |
+| `xhs_desktop_search` | 在桌面 App 中搜索内容 |
+| `xhs_desktop_get_feed` | 获取桌面 App 中的帖子详情（通过标题匹配） |
+| `xhs_desktop_go_back` | 在桌面 App 中返回上一页 |
+
+---
+
+## 使用示例
+
+### 自动回复新评论
+
+```
+用户：帮我检查小红书有没有新评论，如果有就回复"谢谢支持！"
+
+Agent 调用流程：
+1. xhs_check_login                → 确认已登录
+2. xhs_get_notifications_pending { maxPages: 2 }
+3. 过滤 comment_on_my_note / reply_to_my_comment 类型
+4. xhs_reply_comment { feedId, xsecToken, commentId, content: "谢谢支持！" }
+5. xhs_mark_notification { id, status: "replied" }
+```
+
+### 自动回复私信
+
+```
+用户：帮我查一下小红书有没有新私信，有的话帮我回复
+
+Agent 调用流程：
+1. xhs_desktop_im_scan_inbox      → 截图消息列表 + 所有行坐标
+2. 视觉分析截图，找到有未读的对话行及其 clickX/clickY
+3. xhs_desktop_im_open { x, y }   → 打开对话，截图显示消息历史
+4. 读取截图中的消息内容
+5. xhs_desktop_im_send { text: "..." }  → 发送回复
+6. 视觉确认回复已出现在对话中
+7. xhs_desktop_im_back            → 返回收件箱，继续处理下一条
+```
+
+### 搜索并点赞
+
+```
+用户：搜索"手机摄影技巧"，点赞前3条
+
+Agent 调用流程：
+1. xhs_search { keyword: "手机摄影技巧", sortBy: "most_liked" }
+2. 取前3条结果
+3. xhs_like { feedId, xsecToken } × 3
 ```
 
 ---
 
-## 📄 License
+## 技术说明
 
-MIT License - 详见 [LICENSE](LICENSE) 文件
-
----
-
-## 🔗 相关链接
-
-- [OpenClaw 官方文档](https://docs.openclaw.ai)
-- [ClawHub 技能市场](https://clawhub.ai)
-- [OpenClaw GitHub](https://github.com/openclaw/openclaw)
-- [Discord 社区](https://discord.com/invite/clawd)
-
----
-
-## 📊 Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=BodaFu/auto-rednote&type=Date)](https://star-history.com/#BodaFu/auto-rednote&Date)
+- **HTTP 浏览器控制**：插件通过原生 `fetch()` 直接调用 OpenClaw Gateway 的浏览器控制 HTTP 服务，避免 `jiti` 模块隔离导致的 Playwright 连接冲突，由 Gateway 统一管理浏览器实例。
+- **SPA 预热**：小红书是 React SPA，插件会确保 Chrome 已访问首页完成 `window.__INITIAL_STATE__` 初始化，再提取数据。
+- **数据提取**：优先从 `window.__INITIAL_STATE__` 提取结构化数据，降级到 DOM 解析。包含 Vue 响应式 Proxy 深度解包逻辑。
+- **API 拦截**：通知获取拦截 `/api/sns/web/v1/you/mentions`。评论回复在页面注入持续拦截器（`window.__commentAPIEntries`），处理虚拟化渲染和多级评论结构。
+- **多级评论处理**：`xhs_reply_comment` 实现了 4 级容错查找策略，包括从拦截的 API 数据中反推真实父评论 ID。
+- **通知状态持久化**：使用 Node.js 内置 `node:sqlite` 将通知处理状态存储在本地 SQLite 数据库中。
+- **导航可靠性**：三层重试机制（URL 验证 → 强制重导航 → 开新标签页），CDP navigate 返回成功不代表页面已加载。
+- **桌面 IM — Space 切换**：小红书 macOS App 在独立全屏 Space 运行。`activateApp` 使用 `System Events set frontmost to true`（唯一能跨 Space 切换的方式），而非 `tell application X to activate`（只激活进程，不切换 Space）。截图在 Space 切换动画完成后（~800ms）由 `screencapture -R` 执行。
+- **桌面 IM — iOS on Mac 限制**：该 App 是 iOS 移植版，Accessibility 树质量极低（大多数元素标注为"按钮"/"文本"）。工具实现了优雅降级：`peekaboo see` 失败时自动回退到纯截图视觉分析。点击操作使用从已知窗口区域（x=0, y=33, 1512×949）推算的绝对屏幕坐标。
+- **桌面 Feed — Ghost OS**：通过 Ghost OS CLI 操作小红书 macOS App 的 GUI，从 AX 树深度遍历提取 Feed 数据，不依赖网页端 `__INITIAL_STATE__`。更接近真人行为，风控风险更低。
 
 ---
 
-**最后更新：** 2026-02-27  
-**维护者：** [@BodaFu](https://github.com/BodaFu)
+## 常见问题
+
+**`plugin not found: auto-rednote`**
+找不到插件目录。确认 `auto-rednote/` 直接位于 OpenClaw 安装目录下的 `extensions/` 文件夹内，且已在目录内执行 `npm install`。
+
+**`Can't reach the OpenClaw browser control service`**
+OpenClaw browser 尚未启动，或 Chromium 进程崩溃。运行 `openclaw browser` 打开浏览器窗口，等待几秒后重试。
+
+**`{ "loggedIn": false }`**
+需要在 OpenClaw Chromium 窗口中登录小红书。运行 `openclaw browser`，访问 `https://www.xiaohongshu.com` 并登录。
+
+**工具在命令行测试正常，但通过 Agent 调用超时**
+这通常发生在 gateway 刚重启后，browser control service 还在初始化。等待 10–15 秒后重试。
+
+---
+
+## 版本历史
+
+### v2026.3.1
+
+- **新增：桌面 Feed 工具（Ghost OS）** — 4 个新的 `xhs_desktop_*` 工具，通过 GUI 操作小红书 macOS App
+  - `xhs_desktop_list_feeds`、`xhs_desktop_search`、`xhs_desktop_get_feed`、`xhs_desktop_go_back`
+- **新增**：`xhs_search` 支持排序、笔记类型、时间范围、搜索范围筛选
+- **移除**：网页端工具的频率限制冷却机制
+
+### v2026.2.25
+
+- **新增：桌面 IM 工具** — 9 个 `xhs_desktop_im_*` / `xhs_desktop_screenshot` 工具，通过小红书 macOS App 实现私信回复能力
+  - `xhs_desktop_im_scan_inbox`、`xhs_desktop_im_scan_stranger`、`xhs_desktop_im_unread`、`xhs_desktop_im_inbox`、`xhs_desktop_im_open`、`xhs_desktop_im_send`、`xhs_desktop_im_back`、`xhs_desktop_im_see`、`xhs_desktop_screenshot`
+- 修复全屏 Space 切换：`activateApp` 改用 `System Events set frontmost` 正确跨 Space 切换
+- 修复跨 Space 截图：`screenshot()` 先激活 App 等待动画完成（800ms）再截图
+- 校准全屏 1512×949 布局的 UI 坐标（输入框 y=930，返回按钮 y=30）
+- `xhs_search` 新增 `limit` 参数（默认 20），控制返回条数
+
+### v2026.2.24
+
+- 全面重构通知解析与评论查找逻辑
+- 新增 `injectCommentAPIInterceptor`：持续收集评论 API 响应
+- 重写 `scrollToComment` 与 `expandAndFindSubComment`：停滞检测 + has_more 判断
+- 补全 `replyComment` 4 级容错路径
+- 修复 `followUser` ReferenceError
+- 增强 `parseCommentApiResponse`：返回 subCommentCount / subCommentHasMore
+
+### v2026.2.22
+
+- 初始版本，实现 19 个核心工具
+- 覆盖账号、内容、互动、通知、发布全域能力
+
+---
+
+## License
+
+MIT — 详见 [LICENSE](./LICENSE)。
+
+本项目与小红书官方无关，不受其背书。
