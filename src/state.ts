@@ -44,6 +44,14 @@ function initSchema(db: DatabaseSync): void {
     );
     CREATE INDEX IF NOT EXISTS idx_notifications_status ON notifications(status);
     CREATE INDEX IF NOT EXISTS idx_notifications_updated_at ON notifications(updated_at);
+
+    CREATE TABLE IF NOT EXISTS commented_feeds (
+      feed_id TEXT NOT NULL,
+      comment_content TEXT,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (feed_id, comment_content)
+    );
+    CREATE INDEX IF NOT EXISTS idx_commented_feeds_feed_id ON commented_feeds(feed_id);
   `);
 }
 
@@ -167,6 +175,42 @@ export function getLatestNotificationTime(dbPath?: string): number | null {
   `)
     .get() as { latest: number | null };
   return row?.latest ?? null;
+}
+
+// ============================================================================
+// 评论去重 API
+// ============================================================================
+
+/**
+ * 检查是否已经对某篇笔记发表过评论
+ */
+export function hasCommentedOnFeed(feedId: string, dbPath?: string): boolean {
+  const db = getDb(dbPath);
+  const row = db.prepare("SELECT 1 FROM commented_feeds WHERE feed_id = ? LIMIT 1").get(feedId);
+  return row != null;
+}
+
+/**
+ * 记录对某篇笔记的评论
+ */
+export function recordFeedComment(feedId: string, content: string, dbPath?: string): void {
+  const db = getDb(dbPath);
+  const now = Date.now();
+  db.prepare(`
+    INSERT OR IGNORE INTO commented_feeds (feed_id, comment_content, created_at)
+    VALUES (?, ?, ?)
+  `).run(feedId, content.substring(0, 200), now);
+}
+
+/**
+ * 获取对某篇笔记的历史评论数
+ */
+export function getFeedCommentCount(feedId: string, dbPath?: string): number {
+  const db = getDb(dbPath);
+  const row = db
+    .prepare("SELECT COUNT(*) as count FROM commented_feeds WHERE feed_id = ?")
+    .get(feedId) as { count: number } | undefined;
+  return row?.count ?? 0;
 }
 
 /**
