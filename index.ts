@@ -63,7 +63,12 @@ import {
   getNotificationsStats,
 } from "./src/actions/notifications.js";
 import { publishNote } from "./src/actions/publish.js";
-import { initState } from "./src/state.js";
+import {
+  initState,
+  hasCommentedOnFeed,
+  recordFeedComment,
+  getFeedCommentCount,
+} from "./src/state.js";
 import {
   scanInbox,
   scanStrangerList,
@@ -452,7 +457,7 @@ export default function register(api: OpenClawPluginApi) {
   api.registerTool(
     {
       name: "xhs_post_comment",
-      description: "在小红书笔记下发表评论。",
+      description: "在小红书笔记下发表评论。内置防重复机制：同一篇笔记最多评论 1 次，重复调用会被拦截并返回提示。",
       parameters: Type.Object({
         feedId: Type.String({ description: "笔记 ID" }),
         xsecToken: Type.String({ description: "xsec_token" }),
@@ -466,7 +471,21 @@ export default function register(api: OpenClawPluginApi) {
         if (!xsecToken) throw new Error("xsecToken 不能为空");
         if (!content.trim()) throw new Error("content 不能为空");
 
+        if (hasCommentedOnFeed(feedId, dbPath)) {
+          const count = getFeedCommentCount(feedId, dbPath);
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `已拦截：你已经评论过这篇笔记 ${count} 次了，跳过重复评论。请换一篇笔记互动。`,
+              },
+            ],
+            details: { blocked: true, feedId, existingComments: count },
+          };
+        }
+
         const result = await postComment(feedId, xsecToken, content, browserProfile);
+        recordFeedComment(feedId, content, dbPath);
         return {
           content: [{ type: "text" as const, text: result.message }],
           details: result,
